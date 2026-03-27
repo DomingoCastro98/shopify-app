@@ -230,8 +230,7 @@ if ($copied) {{
     Remove-Item -LiteralPath $newFile -Force -ErrorAction SilentlyContinue
 
     Set-Ui 100 'Instalación finalizada. Reiniciando aplicación...'
-    Start-Sleep -Milliseconds 600
-    # Evitar que PyInstaller re-utilice un valor de entorno heredado (_MEIPASS2)
+    Start-Sleep -Milliseconds 3000
     Remove-Item Env:\_MEIPASS2 -ErrorAction SilentlyContinue
     Remove-Item Env:\_MEIPASS -ErrorAction SilentlyContinue
     try {{
