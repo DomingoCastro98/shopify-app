@@ -231,6 +231,9 @@ if ($copied) {{
 
     Set-Ui 100 'Instalación finalizada. Reiniciando aplicación...'
     Start-Sleep -Milliseconds 600
+    # Evitar que PyInstaller re-utilice un valor de entorno heredado (_MEIPASS2)
+    Remove-Item Env:\_MEIPASS2 -ErrorAction SilentlyContinue
+    Remove-Item Env:\_MEIPASS -ErrorAction SilentlyContinue
     try {{
         $workDir = Split-Path -Path $restartExe -Parent
         if ($restartArgs.Count -gt 0) {{
