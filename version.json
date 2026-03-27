@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.0.0/Shopify%20Utilidades.exe",
+  "version": "1.0.1",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.0.1/Shopify%20Utilidades.exe",
   "download_url_py": "",
   "download_url": "",
-  "notes": "Version inicial de Shopify Utilidades. Adaptacion desde WordPress Utilidades v1.0.0."
+  "notes": "Test de version 1.0.1"
 }
