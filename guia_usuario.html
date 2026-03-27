@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shopify Utilidades App - Guía de Usuario</title>
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #334155; }
+        .hero-pattern {
+            background-color: #0f766e;
+            background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2314b8a6' fill-opacity='0.4'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+        }
+    </style>
+</head>
+<body class="antialiased">
+
+    <!-- Header -->
+    <header class="hero-pattern text-white py-16 shadow-lg">
+        <div class="container mx-auto px-6 md:px-12 text-center">
+            <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight mb-4">Shopify <span class="text-teal-200">Utilidades</span> App</h1>
+            <p class="text-xl md:text-2xl font-light text-teal-50 max-w-3xl mx-auto">
+                Tu asistente gráfico definitivo para gestionar entornos de desarrollo locales de Shopify vía Docker,
+                sin dependencias locales globales.
+            </p>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-6 md:px-12 py-12">
+
+        <!-- Introducción -->
+        <section class="max-w-4xl mx-auto mb-16 bg-white p-8 rounded-2xl shadow-sm border border-slate-100">
+            <h2 class="text-2xl font-bold text-slate-800 mb-4 flex items-center">
+                <i class="fa-solid fa-rocket text-teal-600 mr-3"></i> ¿Qué hace esta App?
+            </h2>
+            <p class="text-lg leading-relaxed mb-4">
+                Desarrollar temas en Shopify normalmente requiere instalar Node.js, Ruby y la CLI de Shopify a nivel global en tu ordenador. 
+                Esta aplicación gráfica en Python elimina esa necesidad al <strong>encapsular todo tu entorno en contenedores de Docker</strong>.
+            </p>
+            <p class="text-lg leading-relaxed">
+                Toda la comunicación de comandos viaja entre la app (GUI) y el contenedor seleccionado, permitiéndote tener versiones aisladas 
+                y seguras de tu código de producción listos para editar localmente.
+            </p>
+        </section>
+
+        <!-- Features Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-5xl mx-auto">
+
+            <!-- Feature 1: Crear / Recrear Entorno -->
+            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
+                <div class="w-12 h-12 bg-teal-100 text-teal-600 rounded-xl flex items-center justify-center text-xl mb-6">
+                    <i class="fa-solid fa-box-open"></i>
+                </div>
+                <h3 class="text-xl font-bold text-slate-800 mb-3">Crear y Recrear Entorno</h3>
+                <p class="text-slate-600 mb-4 leading-relaxed">
+                    <strong>Crear:</strong> Inicializa un contenedor Docker nuevo desde cero. Descarga de forma segura la herramienta 
+                    Shopify CLI internamente, te pide sincronizar la URL de tu tienda, realiza un clon del entorno remoto de la tienda 
+                    y ejecuta automáticamente las descargas y rutinas NPM.
+                </p>
+                <p class="text-slate-600 leading-relaxed">
+                    <strong>Recrear:</strong> Si sientes que el entorno está corrupto (errores NPM, problemas de permisos o bloqueos en Shopify CLI), 
+                    esta opción borra totalmente el contenedor antiguo, recrea una versión limpia de cero basándose en el repositorio original 
+                    o clon del tema remoto y restablece las dependencias de forma segura.
+                </p>
+            </div>
+
+            <!-- Feature 2: Importar -->
+            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
+                <div class="w-12 h-12 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-xl mb-6">
+                    <i class="fa-solid fa-upload"></i>
+                </div>
+                <h3 class="text-xl font-bold text-slate-800 mb-3">Importar Theme y Datos</h3>
+                <p class="text-slate-600 mb-4 leading-relaxed">
+                    Transfiere fácilmente código desde tu ordenador (un ZIP o un directorio) hacia dentro del contenedor virtual de Docker.
+                </p>
+                <ul class="list-disc pl-5 mt-2 text-slate-600 space-y-2">
+                    <li>Copilado y <code>npm install</code> automáticos.</li>
+                    <li><strong>Proceso de AutoFix Inteligente:</strong> La aplicación lee <code>settings_schema.json</code> y repara silenciosamente discrepancias e incongruencias en el fichero de datos <code>settings_data.json</code> (ej. números donde la tienda remota obliga formato string o bordes que exceden esquemas).</li>
+                    <li>Soporta despliegue ('Push') automático seguro a la tienda Shopify en Real (Live).</li>
+                </ul>
+            </div>
+
+            <!-- Feature 3: Exportar -->
+            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
+                <div class="w-12 h-12 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center text-xl mb-6">
+                    <i class="fa-solid fa-download"></i>
+                </div>
+                <h3 class="text-xl font-bold text-slate-800 mb-3">Exportar Theme y Datos</h3>
+                <p class="text-slate-600 mb-4 leading-relaxed">
+                    El asistente más importante para hacer un backup o extraer tu trabajo antes de subirlo.
+                </p>
+                <ul class="list-disc pl-5 mt-2 text-slate-600 space-y-2">
+                    <li><strong>Exportación Local:</strong> Empaqueta en formato <code>.tar</code> el entorno completo <code>/app</code> en Docker para extraerlo a tu escritorio/documentos de forma rápida y persistente (con todos tus cambios no guardados en remoto).</li>
+                    <li><strong>Descarga Remota ('Pull'):</strong> La aplicación abre de forma segura una CLI de Shopify en una consola embebida que descarga a la fuerza (vía credencial temporal) todos los assets directamente desde remoto e introduce estos ficheros dentro del paquete de exportación local descargado.</li>
+                </ul>
+            </div>
+
+            <!-- Feature 4: Gestión y Mercados -->
+            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
+                <div class="w-12 h-12 bg-orange-100 text-orange-600 rounded-xl flex items-center justify-center text-xl mb-6">
+                    <i class="fa-solid fa-server"></i>
+                </div>
+                <h3 class="text-xl font-bold text-slate-800 mb-3">Gestión de Contenedores y Mercados</h3>
+                <p class="text-slate-600 mb-4 leading-relaxed">
+                    Desde la barra de navegación principal de la izquierda de la app, manejas la 'Sala de Máquinas':
+                </p>
+                <ul class="list-disc pl-5 mt-2 text-slate-600 space-y-2">
+                    <li>Iniciar/Parar y eliminar entornos de trabajo.</li>
+                    <li>Saltar a los ficheros Log de Docker o abrir una Shell interactiva directamente al entorno del contenedor para debugear comandos sin salir a consola o configurar entornos multi URL.</li>
+                    <li>Informes, estadísticas de mercado de Shopify CLI e información local centralizada de la base de datos de Docker.</li>
+                </ul>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-slate-800 text-slate-400 py-8 mt-12">
+        <div class="container mx-auto px-6 text-center text-sm">
+            <p>&copy; 2026 Shopify Utilidades App (v1.0.0) | Mantenido con Docker</p>
+        </div>
+    </footer>
+
+</body>
+</html>

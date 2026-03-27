@@ -1,0 +1,44 @@
+{
+  "name": "Shopify – shopify-dev1",
+  "attachContainer": "shopify-dev1",
+  "workspaceFolder": "/app/horizon",
+  "shutdownAction": "none",
+  "remoteUser": "root",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode-remote.remote-containers",
+        "ms-vscode-remote.remote-ssh",
+        "ms-vscode-remote.vscode-remote-extensionpack",
+        "ms-vsliveshare.vsliveshare",
+        "sissel.shopify-liquid",
+        "Shopify.theme-check-vscode",
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode",
+        "streetsidesoftware.code-spell-checker",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "sh",
+        "files.autoSave": "afterDelay",
+        "files.autoSaveDelay": 500,
+        "liveshare.guestApprovalRequired": false
+      }
+    }
+  },
+  "forwardPorts": [
+    9292,
+    3000
+  ],
+  "portsAttributes": {
+    "9292": {
+      "label": "Shopify Dev Server",
+      "onAutoForward": "notify"
+    },
+    "3000": {
+      "label": "Theme Preview",
+      "onAutoForward": "notify"
+    }
+  },
+  "dockerHost": "tcp://192.168.200.51:2375"
+}

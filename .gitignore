@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller
+build/
+dist/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Archivos de configuración y bases de datos locales
+*.ini
+perfiles_shopify.ini
+private_profiles.json
+
+# Logs y volcados de errores
+*.log
+historial_shopify.log
+historial_gestor.log
+build_log.txt
+py_compile_output.txt
+
+# IDE y editores
+.vscode/
+.idea/
+*.swp
+
+# Mac OS
+.DS_Store
+
+# Binarios extra (ya que pesan mucho y no se usan)
+*.zip
+docker_bin/docker/
+git_list*.txt

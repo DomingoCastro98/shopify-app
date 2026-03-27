@@ -1,0 +1,10063 @@
+import os
+import io
+import json
+import math
+import queue
+import re
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import traceback
+import tkinter as tk
+import unicodedata
+import urllib.error
+import urllib.request
+import urllib.parse
+from datetime import datetime
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from typing import Callable
+
+# Añadir helper para docker.exe local
+from docker_bin.docker_path_helper import get_docker_exe
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
+# ──────────────────────────────────────────────────────────────────────────────
+APP_VERSION = "1.0.0"  # <-- actualiza este valor en cada release
+
+# URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
+# Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
+# El archivo version.json debe tener este formato:
+# {
+#   "version": "1.1.0",
+#   "download_url": "https://github.com/TU_USUARIO/TU_REPO/releases/download/v1.1.0/wordpress_utilidades_app.py",
+#   "notes": "Descripción de los cambios"
+# }
+_UPDATE_CHECK_URLS = [
+]
+
+
+def _is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _current_install_target() -> str:
+    """Ruta del archivo que debe reemplazarse al actualizar (.exe o .py)."""
+    if _is_frozen_app():
+        return os.path.abspath(sys.executable)
+    return os.path.abspath(__file__)
+
+
+def _restart_command_for_target(target_path: str) -> list[str]:
+    """Comando para relanzar la app tras aplicar la actualización."""
+    if _is_frozen_app():
+        return [target_path]
+    return [sys.executable, target_path]
+
+
+def _select_download_url(update_info: dict) -> str:
+    """Elige la URL de descarga adecuada según el modo de ejecución."""
+    if _is_frozen_app():
+        return (
+            update_info.get("download_url_exe")
+            or update_info.get("download_url")
+            or ""
+        )
+    return (
+        update_info.get("download_url_py")
+        or update_info.get("download_url")
+        or ""
+    )
+
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """Convierte '1.2.3' en (1, 2, 3) para comparar numéricamente."""
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+    except Exception:
+        return (0,)
+
+
+def _check_for_updates_worker(current_version: str, callback: "Callable[[dict], None]") -> None:
+    """Hilo secundario: consulta la URL de versión y dispara callback si hay novedad."""
+    try:
+        data: dict | None = None
+        for check_url in _UPDATE_CHECK_URLS:
+            try:
+                req = urllib.request.Request(
+                    check_url,
+                    headers={"User-Agent": f"ShopifyUtilidades-UpdateChecker/{current_version}"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    break
+            except Exception:
+                continue
+
+        if not data:
+            return
+
+        remote_ver = data.get("version", "")
+        if _parse_version(remote_ver) > _parse_version(current_version):
+            callback(data)
+    except Exception:
+        pass  # Sin conexión o URL no configurada → silencioso
+
+
+def _ps_quote(value: str) -> str:
+    """Escapa comillas simples para strings de PowerShell entre comillas simples."""
+    return value.replace("'", "''")
+
+
+def _launch_updater_and_exit(new_file_path: str, current_file_path: str, restart_cmd: list[str]) -> None:
+    """
+    Lanza un actualizador gráfico (PowerShell + WinForms) que:
+      1. Espera cierre de la app
+      2. Reemplaza archivo actual (.py/.exe) con reintentos
+      3. Relanza la app
+    Luego cierra el proceso actual para liberar el ejecutable.
+    """
+    if not restart_cmd:
+        return
+
+    restart_exe = restart_cmd[0]
+    restart_args = restart_cmd[1:]
+    restart_args_ps = ", ".join(f"'{_ps_quote(a)}'" for a in restart_args)
+    if not restart_args_ps:
+        restart_args_ps = ""
+
+    ps_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$pidToWait = {os.getpid()}
+$newFile = '{_ps_quote(new_file_path)}'
+$currentFile = '{_ps_quote(current_file_path)}'
+$restartExe = '{_ps_quote(restart_exe)}'
+$restartArgs = @({restart_args_ps})
+$selfScript = $MyInvocation.MyCommand.Path
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Actualizando Shopify Utilidades'
+$form.Size = New-Object System.Drawing.Size(500, 220)
+$form.StartPosition = 'CenterScreen'
+$form.TopMost = $true
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $false
+$label.Size = New-Object System.Drawing.Size(460, 34)
+$label.Location = New-Object System.Drawing.Point(18, 14)
+$label.Text = 'Preparando actualización...'
+$label.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$form.Controls.Add($label)
+
+$bar = New-Object System.Windows.Forms.ProgressBar
+$bar.Location = New-Object System.Drawing.Point(18, 64)
+$bar.Size = New-Object System.Drawing.Size(460, 22)
+$bar.Minimum = 0
+$bar.Maximum = 100
+$bar.Style = 'Continuous'
+$form.Controls.Add($bar)
+
+$pct = New-Object System.Windows.Forms.Label
+$pct.AutoSize = $false
+$pct.Size = New-Object System.Drawing.Size(460, 24)
+$pct.Location = New-Object System.Drawing.Point(18, 96)
+$pct.Text = '0%'
+$pct.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$form.Controls.Add($pct)
+
+$closeBtn = New-Object System.Windows.Forms.Button
+$closeBtn.Size = New-Object System.Drawing.Size(120, 30)
+$closeBtn.Location = New-Object System.Drawing.Point(18, 136)
+$closeBtn.Text = 'Cerrar'
+$closeBtn.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$closeBtn.Add_Click({{ $form.Close() }})
+$form.Controls.Add($closeBtn)
+
+function Set-Ui([int]$value, [string]$text) {{
+    if ($value -lt 0) {{ $value = 0 }}
+    if ($value -gt 100) {{ $value = 100 }}
+    $bar.Value = $value
+    $label.Text = $text
+    $pct.Text = "$value%"
+    [System.Windows.Forms.Application]::DoEvents()
+}}
+
+$form.Show()
+Set-Ui 5 'Esperando cierre de la app...'
+
+$waitTicks = 0
+while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Milliseconds 250
+    $waitTicks++
+    $step = 5 + [int]([Math]::Min(15, $waitTicks / 2))
+    Set-Ui $step 'Esperando cierre de la app...'
+    if ($waitTicks -ge 120) {{ break }}
+}}
+
+$copied = $false
+for ($i = 1; $i -le 80; $i++) {{
+    try {{
+        Copy-Item -LiteralPath $newFile -Destination $currentFile -Force -ErrorAction Stop
+        $copied = $true
+        break
+    }} catch {{}}
+
+    $prog = 20 + [int](($i / 80) * 70)
+    Set-Ui $prog "Aplicando actualización... intento $i/80"
+    Start-Sleep -Milliseconds 250
+}}
+
+if ($copied) {{
+    Set-Ui 95 'Limpiando temporales...'
+    $tempDir = [System.IO.Path]::GetTempPath()
+    Get-ChildItem -Path $tempDir -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue | ForEach-Object {{
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+    Remove-Item -LiteralPath $newFile -Force -ErrorAction SilentlyContinue
+
+    Set-Ui 100 'Instalación finalizada. Reiniciando aplicación...'
+    Start-Sleep -Milliseconds 600
+    try {{
+        if ($restartArgs.Count -gt 0) {{
+            Start-Process -FilePath $restartExe -ArgumentList $restartArgs | Out-Null
+        }} else {{
+            Start-Process -FilePath $restartExe | Out-Null
+        }}
+    }} catch {{}}
+    $form.Close()
+}} else {{
+    [System.Windows.Forms.MessageBox]::Show(
+        'No se pudo reemplazar el archivo porque sigue en uso. Cierra la app y vuelve a intentar.',
+        'Error de actualización',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    ) | Out-Null
+}}
+
+while ($form.Visible) {{
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 100
+}}
+
+# Limpieza del propio script temporal del updater
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "ping 127.0.0.1 -n 2 >nul & del /f /q \"$selfScript\"" -WindowStyle Hidden | Out-Null
+""".strip()
+
+    fd, ps1_path = tempfile.mkstemp(prefix="wpu_update_", suffix=".ps1")
+    try:
+        # UTF-8 con BOM para que PowerShell en Windows respete acentos.
+        with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
+            f.write(ps_script)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return
+
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                ps1_path,
+            ],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            close_fds=True,
+        )
+    except Exception:
+        return
+
+    os._exit(0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+try:
+    import docker  # type: ignore[import-not-found]
+    from docker.errors import APIError, DockerException, NotFound  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    docker = None  # type: ignore[assignment]
+    APIError = Exception  # type: ignore[assignment]
+    DockerException = Exception  # type: ignore[assignment]
+    NotFound = Exception  # type: ignore[assignment]
+
+
+def _looks_like_container_spec(path_value: str) -> bool:
+    if ":" not in path_value:
+        return False
+    drive, _tail = os.path.splitdrive(path_value)
+    return not bool(drive)
+
+
+def _sdk_create_client(base_url: str | None, timeout_seconds: int | None) -> object:
+    if docker is None:
+        raise RuntimeError("Docker SDK no disponible. Instala paquete Python 'docker'.")
+    if base_url:
+        client = docker.DockerClient(base_url=base_url, timeout=timeout_seconds)
+    else:
+        client = docker.from_env(timeout=timeout_seconds)
+    client.ping()
+    try:
+        client.api.timeout = None
+    except Exception:
+        pass
+    return client
+
+
+def _sdk_cp_from_container_impl(client: object, container_name: str, src_path: str, local_path: str) -> None:
+    container = client.containers.get(container_name)
+    stream, _stat = container.get_archive(src_path)
+    payload = b"".join(stream)
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as tar:
+        members = tar.getmembers()
+        if not members:
+            raise RuntimeError("No se recibieron datos desde contenedor")
+        first = members[0]
+        extracted = tar.extractfile(first)
+        if extracted is None:
+            raise RuntimeError("No se pudo extraer archivo")
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        with open(local_path, "wb") as fh:
+            fh.write(extracted.read())
+
+
+def _sdk_cp_to_container_impl(client: object, local_path: str, container_name: str, target_path: str) -> None:
+    container = client.containers.get(container_name)
+    target_norm = target_path.replace("\\", "/")
+    parent_dir = os.path.dirname(target_norm.rstrip("/")) or "/"
+    target_name = os.path.basename(target_norm.rstrip("/"))
+    if not target_name:
+        target_name = os.path.basename(local_path.rstrip("\\/"))
+
+    fd, temp_tar_path = tempfile.mkstemp(prefix="wpu_sdk_cp_", suffix=".tar")
+    os.close(fd)
+    try:
+        with tarfile.open(temp_tar_path, mode="w") as tar:
+            tar.add(local_path, arcname=target_name)
+        with open(temp_tar_path, "rb") as tar_stream:
+            ok = container.put_archive(parent_dir, tar_stream.read())
+        if not ok:
+            raise RuntimeError("No se pudo copiar al contenedor")
+    finally:
+        try:
+            os.remove(temp_tar_path)
+        except OSError:
+            pass
+
+
+def _run_sdk_cp_helper(direction: str, base_url: str | None, src: str, dst: str) -> int:
+    client = _sdk_create_client(base_url=base_url, timeout_seconds=None)
+    if direction == "from":
+        container_name, container_path = src.split(":", 1)
+        _sdk_cp_from_container_impl(client, container_name, container_path, dst)
+        return 0
+    if direction == "to":
+        container_name, container_path = dst.split(":", 1)
+        _sdk_cp_to_container_impl(client, src, container_name, container_path)
+        return 0
+    raise RuntimeError(f"Direccion de copia no soportada: {direction}")
+
+
+def _run_helper_cli_from_argv(argv: list[str]) -> int | None:
+    if len(argv) >= 2 and argv[1] == "--wpu-sdk-cp":
+        if len(argv) != 6:
+            print("Uso helper invalido", file=sys.stderr)
+            return 2
+        _mode = argv[1]
+        direction = argv[2]
+        base_url = argv[3] or None
+        src = argv[4]
+        dst = argv[5]
+        try:
+            return _run_sdk_cp_helper(direction, base_url, src, dst)
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    return None
+
+
+class ShopifyUtilitiesApp:
+    def _cancel_profiles_load_guard(self):
+        pass
+
+    def _fail_profiles_loading(self, msg=None):
+        pass
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("Utilidades Shopify + Docker")
+        self.root.geometry("1280x720")
+        self.root.minsize(820, 500)
+        self.root.configure(background="#f1f5f9")
+
+        self.app_dir = os.path.dirname(os.path.abspath(__file__))
+        self.tools_dir = os.path.dirname(self.app_dir)
+        self.profiles_file = os.path.join(self.app_dir, "perfiles_shopify.ini")
+        self.private_profiles_dir = os.path.join(os.environ.get("LOCALAPPDATA", self.tools_dir), "ShopifyUtilidades")
+        self.private_profiles_file = os.path.join(self.private_profiles_dir, "private_profiles.json")
+        self.remote_profiles_volume = "shu_profiles_remote"
+        self.remote_profiles_path = "/data/profiles.json"
+        self.remote_history_volume = "shu_history_remote"
+        self.remote_history_path = "/data/historial_gestor.log"
+        self.history_file = os.path.join(self.app_dir, "historial_shopify.log")
+        self.audit_actor = self._build_audit_actor()
+        self._migrate_legacy_state_files()
+
+        self.status_var = tk.StringVar(value="Docker: comprobando...")
+        self.last_refresh_var = tk.StringVar(value="Ultima actualizacion: -")
+        self.connection_mode_var = tk.StringVar(value="Modo: local")
+        self.profile_name_var = tk.StringVar(value="")
+        self.profile_scope_var = tk.StringVar(value="privado")
+        self.network_container_var = tk.StringVar(value="")
+        self.network_driver_var = tk.StringVar(value="bridge")
+        self.volume_driver_var = tk.StringVar(value="local")
+        self.history_level_var = tk.StringVar(value="TODOS")
+        self.history_search_var = tk.StringVar(value="")
+        self.log_container_var = tk.StringVar(value="")
+        self.log_lines_var = tk.StringVar(value="100")
+        self.log_auto_refresh_var = tk.BooleanVar(value=False)
+        self.log_follow_var = tk.BooleanVar(value=False)
+        self.docker_mode = "local"
+        self.docker_host = ""
+        self.discovered_lan_hosts: list[str] = []
+        self.docker_cli_available: bool | None = None
+        self.docker_sdk_client: object | None = None
+        self._sdk_last_fail_at: float = 0.0
+        self._sdk_retry_cooldown_sec: float = 5.0
+        self.last_docker_error_detail = ""
+        self._last_remote_diag_at: float = 0.0
+        self._last_remote_diag_text = ""
+        self._docker_last_ready = False
+        self._docker_last_checked_at = 0.0
+        self._docker_check_in_progress = False
+        self._docker_check_queue: queue.Queue[tuple[bool, str, str]] = queue.Queue()
+        self._docker_check_job_id: str | None = None
+        self._history_refresh_in_progress = False
+        self._history_refresh_requested = False
+        self._history_refresh_queue: queue.Queue[tuple[bool, object]] = queue.Queue()
+        self._history_refresh_job_id: str | None = None
+        self._history_pending_lines: list[str] = []
+        self._history_pending_lock = threading.Lock()
+        self._profiles_loading = False
+        self._profiles_load_requested = False
+        self._profiles_load_queue: queue.Queue[tuple[str, bool, object]] = queue.Queue()
+        self._profiles_load_job_id: str | None = None
+        self._profiles_load_guard_job_id: str | None = None
+        self._profiles_loading_scope: str | None = None
+        self._profiles_pending_name: str | None = None
+        self._profiles_load_started_at: float = 0.0
+        self._profiles_load_timeout_sec: float = 15.0
+        self._profiles_remote_retry_cooldown_sec: float = 20.0
+        self._profiles_remote_backoff_until: float = 0.0
+        self._helper_label_key = "shu.helper"
+        self._helper_label_value = "1"
+        self._helper_cleanup_in_progress = False
+        self._helper_cleanup_last_at: float = 0.0
+
+        self.refresh_job_id: str | None = None
+        self.logs_refresh_job_id: str | None = None
+        self.logs_follow_poll_job_id: str | None = None
+        self.container_cache: list[str] = []
+        self.container_image_cache: dict[str, str] = {}
+        self.profiles_data: dict[str, list[str]] = {}
+        self.private_profiles_data: dict[str, list[str]] = {}
+        self.remote_profiles_data: dict[str, list[str]] = {}
+        self.network_data: dict[str, dict[str, object]] = {}
+        self.volume_data: dict[str, dict[str, object]] = {}
+        self.history_lines: list[str] = []
+        self.logs_follow_process: subprocess.Popen | None = None
+        self.logs_follow_queue: queue.Queue[str] = queue.Queue()
+        self._sdk_follow_stop_event: threading.Event | None = None
+        self._sdk_follow_active = False
+        self.docker_autostart_attempted = False
+        self.tabs: ttk.Notebook | None = None
+        self.dynamic_tabs: dict[str, ttk.Frame] = {}
+        self.sidebar_frame: tk.Frame | None = None
+        self.sidebar_logo_title_label: tk.Label | None = None
+        self.sidebar_logo_subtitle_label: tk.Label | None = None
+        self.sidebar_status_label: tk.Label | None = None
+        self.sidebar_shortcuts_label: tk.Label | None = None
+        self.sidebar_quit_button: tk.Button | None = None
+        self.sidebar_nav_buttons: list[tuple[tk.Button, str, str]] = []
+        self.is_compact_layout = False
+        self._layout_reflow_job: str | None = None
+        self.spinner_job_id: str | None = None
+        self.spinner_index = 0
+        self.spinner_base_text = ""
+        self.docker_status_dot: tk.Label | None = None
+        self.connection_mode_badge: tk.Label | None = None
+        self.container_action_btns: list[ttk.Button] = []
+        self.profile_action_btns: list[ttk.Button] = []
+        self._container_spinner_job: str | None = None
+        self._container_spinner_items: list[str] = []
+        self._container_spinner_frame: int = 0
+        self._container_loading_job: str | None = None
+        self._container_loading_frame: int = 0
+        self._profile_spinner_job: str | None = None
+        self._profile_spinner_name: str = ""
+        self._profile_spinner_frame2: int = 0
+        self.container_admin_tree: ttk.Treeview | None = None
+        self.history_tab_frame: ttk.Frame | None = None
+        self.container_tab_frame: ttk.Frame | None = None
+        self.volumes_tab_frame: ttk.Frame | None = None
+        self.profiles_tab_frame: ttk.Frame | None = None
+        self.networks_tab_frame: ttk.Frame | None = None
+        self.logs_tab_frame: ttk.Frame | None = None
+        self._last_auto_heavy_refresh_at: float = 0.0
+        self._auto_heavy_refresh_interval_sec: float = 30.0
+
+        self._configure_styles()
+        self._build_ui()
+        self._bind_global_shortcuts()
+        if not self._prompt_startup_connection_mode():
+            self.root.after(10, self.root.destroy)
+            return
+        self.status_var.trace_add("write", self._update_status_dot)
+        self._update_connection_mode_badge()
+        self.refresh_everything()
+
+        # Comprobar actualizaciones en segundo plano (2s de retraso para que la UI esté lista)
+        self.root.after(2000, self._start_update_check)
+
+    # ── Actualización automática ──────────────────────────────────────────────
+
+    def _start_update_check(self) -> None:
+        """Lanza la comprobación de versión en hilo secundario."""
+        t = threading.Thread(
+            target=_check_for_updates_worker,
+            args=(APP_VERSION, self._on_update_available),
+            daemon=True,
+        )
+        t.start()
+
+    def _on_update_available(self, update_info: dict) -> None:
+        """Callback ejecutado desde el hilo de red; despacha al hilo principal de Tkinter."""
+        self.root.after(0, lambda: self._show_update_dialog(update_info))
+
+    def _show_update_dialog(self, update_info: dict) -> None:
+        """Muestra una ventana de actualización con progreso de descarga."""
+        remote_ver = update_info.get("version", "?")
+        download_url = _select_download_url(update_info)
+        notes = update_info.get("notes", "")
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Actualización disponible")
+        dlg.geometry("460x300")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.configure(bg="#f1f5f9")
+
+        # Centrar sobre la ventana principal
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 460) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 300) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+        tk.Label(
+            dlg,
+            text=f"🆕  Nueva versión disponible: v{remote_ver}",
+            font=("Segoe UI Semibold", 13),
+            bg="#f1f5f9",
+            fg="#0f766e",
+        ).pack(pady=(22, 4))
+
+        tk.Label(
+            dlg,
+            text=f"Versión instalada: v{APP_VERSION}",
+            font=("Segoe UI", 10),
+            bg="#f1f5f9",
+            fg="#6b7f93",
+        ).pack()
+
+        if notes:
+            tk.Label(
+                dlg,
+                text=notes,
+                font=("Segoe UI", 10),
+                bg="#f1f5f9",
+                fg="#365066",
+                wraplength=400,
+                justify="center",
+            ).pack(pady=(10, 0))
+
+        status_var = tk.StringVar(value="")
+        status_lbl = tk.Label(dlg, textvariable=status_var, bg="#f1f5f9", fg="#6b7f93", font=("Segoe UI", 9))
+        status_lbl.pack(pady=(12, 2))
+
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(dlg, variable=progress_var, maximum=100, length=380)
+        progress_bar.pack(pady=(0, 14))
+
+        btn_frame = tk.Frame(dlg, bg="#f1f5f9")
+        btn_frame.pack()
+
+        update_btn = ttk.Button(btn_frame, text="⬇  Descargar e instalar", style="Accent.TButton")
+        skip_btn   = ttk.Button(btn_frame, text="Ahora no", style="Ghost.TButton")
+        update_btn.pack(side="left", padx=6)
+        skip_btn.pack(side="left", padx=6)
+
+        def do_skip() -> None:
+            dlg.destroy()
+
+        def do_update() -> None:
+            if not download_url:
+                mode = ".exe" if _is_frozen_app() else ".py"
+                messagebox.showerror(
+                    "Error",
+                    f"No hay URL de descarga configurada para modo {mode}.",
+                    parent=dlg,
+                )
+                return
+            update_btn.configure(state="disabled")
+            skip_btn.configure(state="disabled")
+            status_var.set("Iniciando descarga...")
+            t = threading.Thread(
+                target=self._download_and_apply_update,
+                args=(download_url, dlg, status_var, progress_var, update_btn, skip_btn),
+                daemon=True,
+            )
+            t.start()
+
+        update_btn.configure(command=do_update)
+        skip_btn.configure(command=do_skip)
+
+    def _download_and_apply_update(
+        self,
+        url: str,
+        dlg: tk.Toplevel,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        update_btn: ttk.Button,
+        skip_btn: ttk.Button,
+    ) -> None:
+        """Descarga la actualización con barra de progreso y luego aplica el reemplazo."""
+
+        def ui(fn: "Callable[[], None]") -> None:
+            """Despacha al hilo principal de forma segura."""
+            try:
+                self.root.after(0, fn)
+            except Exception:
+                pass
+
+        current_target = _current_install_target()
+        restart_cmd = _restart_command_for_target(current_target)
+
+        parsed = urllib.parse.urlparse(url)
+        _, ext = os.path.splitext(parsed.path)
+        if not ext:
+            ext = ".tmp"
+
+        fd, tmp_path = tempfile.mkstemp(prefix="wpu_new_", suffix=ext)
+        os.close(fd)
+
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"ShopifyUtilidades-Updater/{APP_VERSION}"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                chunk_size = 16 * 1024
+
+                with open(tmp_path, "wb") as fh:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = downloaded / total * 100
+                            _pct = pct  # closure capture
+                            ui(lambda p=_pct: progress_var.set(p))
+                        kb = downloaded // 1024
+                        _kb = kb
+                        ui(lambda k=_kb: status_var.set(f"Descargando... {k} KB"))
+
+                if total > 0 and downloaded != total:
+                    raise RuntimeError(
+                        f"Descarga incompleta ({downloaded} de {total} bytes)."
+                    )
+
+            # Verificación mínima: que el archivo no esté vacío
+            size = os.path.getsize(tmp_path)
+            if size < 100:
+                raise RuntimeError("El archivo descargado parece incompleto o inválido.")
+
+            # Validaciones de integridad según tipo de actualización.
+            if _is_frozen_app():
+                # Un ejecutable PE en Windows debe iniciar con bytes MZ.
+                with open(tmp_path, "rb") as fh:
+                    magic = fh.read(2)
+                if magic != b"MZ":
+                    raise RuntimeError(
+                        "El archivo descargado no parece un .exe válido (firma PE inválida)."
+                    )
+            else:
+                # Para modo script, validar que el contenido sea texto Python razonable.
+                with open(tmp_path, "rb") as fh:
+                    head = fh.read(4096)
+                try:
+                    head_text = head.decode("utf-8", errors="ignore")
+                except Exception:
+                    head_text = ""
+                if not any(tok in head_text for tok in ("import ", "def ", "class ", "#")):
+                    raise RuntimeError(
+                        "El archivo descargado no parece un script Python válido."
+                    )
+
+            ui(lambda: progress_var.set(100))
+            ui(lambda: status_var.set("Descarga completada. Aplicando actualización..."))
+
+            # Pequeña pausa para que el usuario vea el mensaje
+            time.sleep(1.2)
+
+            # Cerrar diálogo y lanzar el actualizador externo
+            def _apply() -> None:
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+                _launch_updater_and_exit(tmp_path, current_target, restart_cmd)
+
+            ui(_apply)
+
+        except Exception as exc:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+            def _err(msg: str = str(exc), failed_url: str = url) -> None:
+                status_var.set(f"Error: {msg}")
+                try:
+                    update_btn.configure(state="normal")
+                    skip_btn.configure(state="normal")
+                except Exception:
+                    pass
+                messagebox.showerror(
+                    "Error de actualización",
+                    (
+                        "No se pudo descargar la actualización:\n\n"
+                        f"{msg}\n\n"
+                        "URL consultada:\n"
+                        f"{failed_url}"
+                    ),
+                    parent=dlg,
+                )
+
+            ui(_err)
+
+    # ── Fin actualización automática ──────────────────────────────────────────
+
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        bg        = "#edf3f7"   # main background
+        surface   = "#ffffff"   # card / panel
+        surface2  = "#f5f9fc"   # secondary surface
+        text      = "#0f172a"   # primary text
+        text2     = "#365066"   # secondary text
+        muted     = "#6b7f93"   # muted text
+        accent    = "#0f766e"   # teal-700
+        accent_hv = "#115e59"   # teal-800
+        border    = "#d7e3ec"   # border
+        selected  = "#d1fae5"   # selected rows
+
+        style.configure(".", font=("Segoe UI", 10), background=bg, foreground=text)
+        style.configure("TFrame", background=bg)
+        style.configure("Card.TFrame", background=surface)
+        style.configure("TLabel", background=bg, foreground=text)
+        style.configure("Surface.TLabel", background=surface, foreground=text)
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 14), background=bg, foreground="#0b2a3f")
+        style.configure("Muted.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
+
+        style.configure("TNotebook", background=bg, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", padding=(16, 10), background="#e3edf3", foreground=text2, font=("Segoe UI Semibold", 10))
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", surface), ("active", "#d2e4ef")],
+            foreground=[("selected", accent)],
+        )
+
+        style.configure(
+            "TButton",
+            padding=(12, 8),
+            background="#deebf3",
+            foreground="#0f172a",
+            borderwidth=1,
+            relief="solid",
+            bordercolor=border,
+        )
+        style.map(
+            "TButton",
+            background=[("active", "#c8dbe8"), ("pressed", "#aac0d0")],
+            foreground=[("active", "#0f172a")],
+            relief=[("active", "solid")],
+        )
+        style.configure("Accent.TButton", padding=(13, 8), background=accent, foreground="#ffffff", borderwidth=0, relief="flat")
+        style.map("Accent.TButton", background=[("active", accent_hv), ("pressed", "#134e4a")], relief=[("active", "flat")])
+        style.configure("Ghost.TButton", padding=(9, 6), background=bg, foreground=text2, borderwidth=0, relief="flat")
+        style.map("Ghost.TButton", background=[("active", "#dce8f0")], relief=[("active", "flat")])
+        style.configure("Admin.TButton", padding=(10, 7), background="#dce8f0", foreground="#0f172a", borderwidth=1, relief="solid")
+        style.map("Admin.TButton", background=[("active", "#c8dbe8"), ("pressed", "#aac0d0")], foreground=[("active", "#0f172a")])
+        style.configure("Danger.TButton", padding=(10, 7), background="#fee2e2", foreground="#991b1b", borderwidth=1, relief="solid")
+        style.map("Danger.TButton", background=[("active", "#fecaca"), ("pressed", "#fca5a5")], foreground=[("active", "#7f1d1d")])
+
+        style.configure("TLabelframe", background=bg, borderwidth=1, relief="solid", bordercolor=border)
+        style.configure("TLabelframe.Label", background=bg, foreground=accent, font=("Segoe UI Semibold", 10))
+
+        style.configure("TEntry", fieldbackground=surface, bordercolor=border, insertcolor="#0b2a3f")
+        style.configure("TCombobox", fieldbackground=surface, bordercolor=border)
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", surface), ("readonly focus", surface)],
+            foreground=[("readonly", text), ("readonly focus", text)],
+            selectbackground=[("readonly", surface), ("readonly focus", surface)],
+            selectforeground=[("readonly", text), ("readonly focus", text)],
+        )
+
+        style.configure("Horizontal.TProgressbar", troughcolor=border, background=accent, borderwidth=0, thickness=8)
+
+        style.configure("TScrollbar", troughcolor=surface2, background="#c4d5e2", relief="flat", arrowsize=13)
+        style.map("TScrollbar", background=[("active", "#90a7bb")])
+
+        style.configure(
+            "Treeview",
+            background=surface,
+            fieldbackground=surface,
+            foreground=text,
+            rowheight=30,
+            relief="flat",
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=surface2,
+            foreground=text2,
+            font=("Segoe UI Semibold", 10),
+            relief="flat",
+        )
+        style.map("Treeview", background=[("selected", selected)], foreground=[("selected", accent)])
+        style.map("Treeview.Heading", background=[("active", border)])
+
+        style.configure("TSeparator", background=border)
+        style.configure("TCheckbutton", background=bg, foreground=text)
+
+    def _build_ui(self) -> None:
+        _SB  = "#0b2537"   # sidebar background
+        _SBH = "#123347"   # sidebar hover
+        _SHD = "#081b2a"   # sidebar header
+        _FG  = "#d6e4ee"   # sidebar foreground
+        _FGM = "#7d95a8"   # sidebar muted foreground
+
+        self.root.columnconfigure(0, weight=0)
+        self.root.columnconfigure(1, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        # ── Sidebar ─────────────────────────────────────────────────────────
+        sidebar = tk.Frame(self.root, bg=_SB, width=234)
+        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar.grid_propagate(False)
+        self.sidebar_frame = sidebar
+
+        # Logo area
+        logo_f = tk.Frame(sidebar, bg=_SHD, padx=18, pady=18)
+        logo_f.pack(fill="x")
+        self.sidebar_logo_title_label = tk.Label(logo_f, text="\u2726  Shopify", fg="#93c5fd", bg=_SHD,
+                             font=("Segoe UI Semibold", 14))
+        self.sidebar_logo_title_label.pack(anchor="w")
+        self.sidebar_logo_subtitle_label = tk.Label(logo_f, text="Docker Tools", fg="#88a0b2", bg=_SHD,
+                                font=("Segoe UI", 9))
+        self.sidebar_logo_subtitle_label.pack(anchor="w", pady=(3, 0))
+        tk.Frame(logo_f, bg="#14b8a6", height=2).pack(fill="x", pady=(14, 0))
+
+        # Navigation buttons
+        nav_items = [
+            ("\u2699  Crear / Recrear entorno",   self.open_setup_wizard),
+            ("\u2b07  Importar theme/datos",       self.open_import_wizard),
+            ("\u2b06  Exportar theme/datos",       self.open_export_wizard),
+            ("\u25b6  Gestionar contenedores",     self.open_containers_manager),
+            ("\u2139  Ayuda — esta app",           self.open_app_docs),
+            ("\u2261  Documentacion scripts",      self.open_docs),
+        ]
+        nav_f = tk.Frame(sidebar, bg=_SB)
+        nav_f.pack(fill="x", pady=(6, 0))
+        self.sidebar_nav_buttons = []
+        for label, cmd in nav_items:
+            compact_label = label.split("  ", 1)[0].strip()
+            btn = tk.Button(
+                nav_f, text=label, command=cmd, anchor="w",
+                padx=18, pady=11, relief="flat", bd=0,
+                bg=_SB, fg=_FG,
+                activebackground=_SBH, activeforeground="#ffffff",
+                font=("Segoe UI", 10), cursor="hand2", highlightthickness=0,
+            )
+            btn.pack(fill="x")
+            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=_SBH, fg="#ffffff"))
+            btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=_SB, fg=_FG))
+            self.sidebar_nav_buttons.append((btn, label, compact_label))
+
+        self.sidebar_shortcuts_label = tk.Label(
+            sidebar,
+            text="Atajos: Ctrl+R refrescar | Ctrl+I importar theme | Ctrl+E exportar theme",
+            fg="#7d95a8",
+            bg=_SB,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            padx=18,
+            pady=8,
+        )
+        self.sidebar_shortcuts_label.pack(fill="x")
+
+        # Separator
+        tk.Frame(sidebar, bg="#1f3e54", height=1).pack(fill="x", padx=16, pady=(12, 6))
+
+        # Close button
+        quit_b = tk.Button(
+            sidebar, text="\u00d7  Cerrar aplicacion", command=self.on_close,
+            anchor="w", padx=18, pady=10, relief="flat", bd=0,
+            bg=_SB, fg=_FGM,
+            activebackground="#7f1d1d", activeforeground="#fca5a5",
+            font=("Segoe UI", 10), cursor="hand2", highlightthickness=0,
+        )
+        quit_b.pack(fill="x")
+        quit_b.bind("<Enter>", lambda e: quit_b.configure(bg="#7f1d1d", fg="#fca5a5"))
+        quit_b.bind("<Leave>", lambda e: quit_b.configure(bg=_SB, fg=_FGM))
+        self.sidebar_quit_button = quit_b
+
+        # Docker status at the bottom of the sidebar
+        status_f = tk.Frame(sidebar, bg=_SHD, padx=16, pady=12)
+        status_f.pack(side="bottom", fill="x")
+        dot_row = tk.Frame(status_f, bg=_SHD)
+        dot_row.pack(fill="x")
+        self.docker_status_dot = tk.Label(dot_row, text="\u25cf", fg="#7d95a8", bg=_SHD,
+                                          font=("Segoe UI", 12))
+        self.docker_status_dot.pack(side="left")
+        self.sidebar_status_label = tk.Label(
+            dot_row,
+            textvariable=self.status_var,
+            fg="#88a0b2",
+            bg=_SHD,
+            font=("Segoe UI", 9),
+            wraplength=160,
+            justify="left",
+        )
+        self.sidebar_status_label.pack(side="left", padx=(6, 0))
+
+        # ── Main content area ────────────────────────────────────────────────
+        main = tk.Frame(self.root, bg="#edf3f7")
+        main.grid(row=0, column=1, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(2, weight=1)
+
+        # Header bar (white strip with title + refresh timestamp)
+        hdr = tk.Frame(main, bg="#ffffff", padx=22, pady=14)
+        hdr.grid(row=0, column=0, sticky="ew")
+        tk.Label(hdr, text="Panel de control", fg="#0b2a3f", bg="#ffffff",
+                 font=("Segoe UI Semibold", 15)).pack(side="left")
+        tk.Label(
+            hdr,
+            text=f"Version: {APP_VERSION}",
+            fg="#6b7f93",
+            bg="#ffffff",
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(10, 0))
+        self.connection_mode_badge = tk.Label(
+            hdr,
+            textvariable=self.connection_mode_var,
+            fg="#0f4b47",
+            bg="#d1fae5",
+            font=("Segoe UI Semibold", 9),
+            padx=8,
+            pady=3,
+        )
+        self.connection_mode_badge.pack(side="left", padx=(12, 0))
+        ttk.Button(
+            hdr,
+            text="Cambiar modo Docker",
+            style="Ghost.TButton",
+            command=self.change_connection_mode,
+        ).pack(side="right", padx=(0, 12))
+        tk.Label(hdr, textvariable=self.last_refresh_var, fg="#6b7f93", bg="#ffffff",
+                 font=("Segoe UI", 9)).pack(side="right")
+
+        # Thin separator under header
+        tk.Frame(main, bg="#e2e8f0", height=1).grid(row=1, column=0, sticky="ew")
+
+        # Notebook wrapper
+        nb_wrap = ttk.Frame(main, padding=(16, 12))
+        nb_wrap.grid(row=2, column=0, sticky="nsew")
+        nb_wrap.columnconfigure(0, weight=1)
+        nb_wrap.rowconfigure(0, weight=1)
+
+        self.tabs = ttk.Notebook(nb_wrap)
+        self.tabs.grid(row=0, column=0, sticky="nsew")
+
+        container_tab = ttk.Frame(self.tabs, padding=10)
+        volumes_tab  = ttk.Frame(self.tabs, padding=10)
+        profiles_tab  = ttk.Frame(self.tabs, padding=10)
+        networks_tab  = ttk.Frame(self.tabs, padding=10)
+        history_tab   = ttk.Frame(self.tabs, padding=10)
+        logs_tab      = ttk.Frame(self.tabs, padding=10)
+
+        self.tabs.add(container_tab, text="  Contenedores  ")
+        self.tabs.add(volumes_tab,   text="  Volumenes  ")
+        self.tabs.add(profiles_tab,  text="  Perfiles  ")
+        self.tabs.add(networks_tab,  text="  Redes  ")
+        self.tabs.add(history_tab,   text="  Historial  ")
+        self.tabs.add(logs_tab,      text="  Logs  ")
+
+        self.container_tab_frame = container_tab
+        self.volumes_tab_frame = volumes_tab
+        self.profiles_tab_frame = profiles_tab
+        self.networks_tab_frame = networks_tab
+        self.logs_tab_frame = logs_tab
+
+        self._build_containers_tab(container_tab)
+        self._build_volumes_tab(volumes_tab)
+        self._build_profiles_tab(profiles_tab)
+        self._build_networks_tab(networks_tab)
+        self._build_history_tab(history_tab)
+        self._build_logs_tab(logs_tab)
+        self.history_tab_frame = history_tab
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_history_tab_selected)
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.bind("<Configure>", self._schedule_layout_reflow, add="+")
+        self.root.after(120, self._apply_responsive_layout)
+
+    def _create_scrollable_surface(self, parent: ttk.Frame, padding: tuple[int, int] = (10, 10)) -> ttk.Frame:
+        host = ttk.Frame(parent, style="Card.TFrame")
+        host.pack(fill="both", expand=True)
+        host.columnconfigure(0, weight=1)
+        host.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(
+            host,
+            background="#edf3f7",
+            borderwidth=0,
+            highlightthickness=0,
+            relief="flat",
+        )
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(host, orient="horizontal", command=canvas.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        content = ttk.Frame(canvas, padding=padding)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def sync_scroll_region(_event: object = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def fit_content_width(event: tk.Event) -> None:
+            required_width = content.winfo_reqwidth()
+            canvas.itemconfigure(window_id, width=max(event.width, required_width))
+
+        def _on_mouse_wheel(event: tk.Event) -> str:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        content.bind("<Configure>", sync_scroll_region)
+        canvas.bind("<Configure>", fit_content_width)
+        content.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mouse_wheel))
+        content.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        self.root.after(50, sync_scroll_region)
+        return content
+
+    def open_containers_manager(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        window = self._open_or_focus_work_tab("container_admin", "Gestion contenedores")
+        if window is None:
+            messagebox.showerror("Interfaz", "No se pudo abrir la pestaña de gestión de contenedores.")
+            return
+
+        for child in window.winfo_children():
+            child.destroy()
+
+        outer = ttk.Frame(window, padding=4)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+        self._add_work_tab_header(outer, "Gestión avanzada de contenedores", "container_admin")
+
+        table_frame = ttk.Frame(outer)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.rowconfigure(1, weight=0)
+
+        cols = ("name", "state", "image", "ports", "protection")
+        self.container_admin_tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        self.container_admin_tree.heading("name", text="Contenedor")
+        self.container_admin_tree.heading("state", text="Estado")
+        self.container_admin_tree.heading("image", text="Imagen")
+        self.container_admin_tree.heading("ports", text="Puertos")
+        self.container_admin_tree.heading("protection", text="Proteccion")
+        self.container_admin_tree.column("name", width=200, anchor="w")
+        self.container_admin_tree.column("state", width=120, anchor="center")
+        self.container_admin_tree.column("image", width=280, anchor="w")
+        self.container_admin_tree.column("ports", width=260, anchor="w")
+        self.container_admin_tree.column("protection", width=320, anchor="w")
+        self.container_admin_tree.grid(row=0, column=0, sticky="nsew")
+
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.container_admin_tree.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.container_admin_tree.xview)
+        xscroll.grid(row=1, column=0, sticky="ew")
+        self.container_admin_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        actions = ttk.Frame(outer)
+        actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(actions, text="Refrescar", command=self._refresh_container_admin_table, style="Admin.TButton").pack(side="left")
+        ttk.Button(actions, text="Renombrar", command=self._rename_container_admin, style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Borrar", command=self._delete_container_admin, style="Danger.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Arrancar", command=lambda: self._toggle_container_admin("start"), style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Apagar", command=lambda: self._toggle_container_admin("stop"), style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Acceso Remoto (code-server)", command=self._remote_access_container_admin, style="Admin.TButton").pack(side="left", padx=6)
+
+        self._refresh_container_admin_table()
+
+    def _refresh_container_admin_table(self) -> None:
+        if self.container_admin_tree is None or not self.container_admin_tree.winfo_exists():
+            return
+
+        for item in self.container_admin_tree.get_children():
+            self.container_admin_tree.delete(item)
+
+        code, out, err = self._run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Image}}|{{.Ports}}|{{.Command}}"])
+        if code != 0:
+            messagebox.showwarning("Contenedores", err or "No se pudieron listar contenedores.")
+            return
+
+        if not out.strip():
+            self.container_admin_tree.insert("", "end", values=("(sin contenedores)", "-", "-", "-", "-"))
+            return
+
+        for line in out.splitlines():
+            parts = line.split("|", 4)
+            if len(parts) < 5:
+                continue
+            name = parts[0].strip()
+            status_raw = parts[1].strip()
+            image = parts[2].strip()
+            ports = parts[3].strip() or "-"
+            command = parts[4].strip()
+            if self._is_hidden_helper_container(name, image, command):
+                continue
+            state = "ARRANCADO" if status_raw.lower().startswith("up") else "APAGADO"
+            protection = self._container_protection_text(name, image)
+            tags: list[str] = []
+            service_tag = self._container_service_tag(name, image)
+            if service_tag:
+                tags.append(service_tag)
+            self.container_admin_tree.insert("", "end", values=(name, state, image, ports, protection), tags=tuple(tags))
+
+    def _selected_container_admin(self) -> str | None:
+        if self.container_admin_tree is None or not self.container_admin_tree.winfo_exists():
+            return None
+        selected = self.container_admin_tree.selection()
+        if not selected:
+            return None
+        values = self.container_admin_tree.item(selected[0], "values")
+        if not values:
+            return None
+        name = str(values[0]).strip()
+        if not name or name == "(sin contenedores)":
+            return None
+        return name
+
+    def _rename_container_admin(self) -> None:
+        container = self._selected_container_admin()
+        if not container:
+            messagebox.showwarning("Contenedores", "Selecciona un contenedor para renombrar.")
+            return
+
+        new_name = simpledialog.askstring("Renombrar contenedor", f"Nuevo nombre para '{container}':", initialvalue=container)
+        if not new_name:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == container:
+            messagebox.showwarning("Contenedores", "Nombre nuevo no válido.")
+            return
+
+        code, _, err = self._run(["docker", "rename", container, new_name])
+        if code != 0:
+            messagebox.showerror("Contenedores", err or "No se pudo renombrar el contenedor.")
+            return
+
+        self.log_event("CONTAINER", container, "OK", f"Renombrado a {new_name}")
+        self.refresh_everything()
+        self._refresh_container_admin_table()
+        messagebox.showinfo("Contenedores", f"Contenedor renombrado: {container} -> {new_name}")
+
+    def _delete_container_admin(self) -> None:
+        container = self._selected_container_admin()
+        if not container:
+            messagebox.showwarning("Contenedores", "Selecciona un contenedor para borrar.")
+            return
+
+        matches = self._profiles_containing_container(container)
+        if matches:
+            scope_lines: list[str] = []
+            if matches.get("privado"):
+                scope_lines.append("Perfiles privados: " + ", ".join(matches["privado"]))
+            if matches.get("remoto"):
+                scope_lines.append("Perfiles remotos: " + ", ".join(matches["remoto"]))
+
+            confirm_remove = messagebox.askyesno(
+                "Contenedores",
+                (
+                    f"El contenedor '{container}' esta incluido en perfiles.\n\n"
+                    + "\n".join(scope_lines)
+                    + "\n\nQuieres quitarlo de esos perfiles antes de borrar el contenedor?"
+                ),
+            )
+            if not confirm_remove:
+                messagebox.showwarning(
+                    "Contenedores",
+                    f"No se puede borrar '{container}' sin quitarlo de los perfiles donde esta incluido.",
+                )
+                return
+
+            removed_ok, remove_error = self._remove_container_from_profile_scopes(container, matches)
+            if not removed_ok:
+                messagebox.showerror("Contenedores", remove_error or "No se pudo quitar el contenedor de los perfiles.")
+                return
+
+            removed_scopes = ", ".join([k for k in ("privado", "remoto") if matches.get(k)])
+            self.log_event("CONTAINER", container, "OK", f"Quitado de perfiles antes de borrar ({removed_scopes})")
+
+        if not messagebox.askyesno("Contenedores", f"Eliminar contenedor '{container}'?\n\nSe forzará parada si está arrancado."):
+            return
+
+        code, out, err = self._run(["docker", "rm", "-f", container])
+        if code != 0:
+            details = err or out or f"Docker devolvio codigo {code} sin detalle."
+            messagebox.showerror("Contenedores", f"No se pudo borrar el contenedor.\n\n{details}")
+            return
+
+        self.log_event("CONTAINER", container, "OK", "Eliminado desde gestor avanzado")
+        self.refresh_everything()
+        self.refresh_profiles_ui(force=True)
+        self._refresh_container_admin_table()
+        messagebox.showinfo("Contenedores", f"Contenedor eliminado: {container}")
+
+    def _toggle_container_admin(self, mode: str) -> None:
+        container = self._selected_container_admin()
+        if not container:
+            messagebox.showwarning("Contenedores", "Selecciona un contenedor.")
+            return
+
+        action = "start" if mode == "start" else "stop"
+        code, _, err = self._run(["docker", action, container])
+        if code != 0:
+            messagebox.showerror("Contenedores", err or f"No se pudo {action} {container}.")
+            return
+
+        estado = "arrancado" if action == "start" else "apagado"
+        self.log_event("CONTAINER", container, "OK", f"Contenedor {estado} desde gestor avanzado")
+        self.refresh_everything()
+        self._refresh_container_admin_table()
+        messagebox.showinfo("Contenedores", f"Contenedor {estado}: {container}")
+
+    def _remote_access_container_admin(self) -> None:
+        container = self._selected_container_admin()
+        if not container:
+            messagebox.showwarning("Contenedores", "Selecciona un contenedor para el acceso remoto.")
+            return
+        self._remote_access_impl(container)
+
+    def _remote_access_impl(self, container: str) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        # Verificar si el contenedor está encendido
+        c_code, c_out, _ = self._run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        if c_code != 0 or c_out.strip().lower() != "true":
+            messagebox.showwarning("Acceso Remoto", f"El contenedor '{container}' debe estar encendido para habilitar el acceso remoto.")
+            return
+
+        # Detectar el puerto 8080 mapeado en el host para este contenedor
+        _, ports_out, _ = self._run([
+            "docker", "inspect", "--format",
+            "{{range $p, $b := .NetworkSettings.Ports}}{{$p}}->{{range $b}}{{.HostPort}}{{end}} {{end}}",
+            container
+        ])
+        host_port = "8080"
+        if ports_out:
+            for part in ports_out.split():
+                if part.startswith("8080/tcp->"):
+                    mapped = part.split("->", 1)[1].strip()
+                    if mapped:
+                        host_port = mapped
+                        break
+
+        # Obtener IP de red local
+        host_ip = self._get_local_ip() if hasattr(self, "_get_local_ip") else "localhost"
+        codeserver_url = f"http://{host_ip}:{host_port}"
+
+        # Verificar si code-server ya está corriendo dentro del contenedor
+        _, ps_out, _ = self._run(["docker", "exec", container, "sh", "-c", "pgrep -f code-server || echo ''"])
+        already_running = bool((ps_out or "").strip())
+
+        if already_running:
+            self._show_codeserver_instructions(container, codeserver_url, host_port)
+            return
+
+        confirm = messagebox.askyesno(
+            "Acceso Remoto — code-server",
+            f"Vas a iniciar code-server en el contenedor '{container}'.\n\n"
+            "✅ Sin contraseña — cualquiera en la red puede conectarse.\n"
+            "✅ Abre VS Code directamente en la app nativa o en el navegador.\n"
+            f"✅ URL de acceso: {codeserver_url}\n\n"
+            "¿Continuar?"
+        )
+        if not confirm:
+            return
+
+        # Comando: instalar code-server si falta, luego arrancarlo sin auth
+        install_and_run = (
+            "sh -c \""
+            "if ! command -v code-server >/dev/null 2>&1; then "
+            "  echo '[cs] Instalando code-server...' >> /tmp/code-server.log 2>&1; "
+            "  curl -fsSL https://code-server.dev/install.sh | sh -s -- --method standalone --prefix /usr/local >> /tmp/code-server.log 2>&1 "
+            "  || npm install -g code-server >> /tmp/code-server.log 2>&1; "
+            "fi; "
+            "echo '[cs] Arrancando code-server sin auth...' >> /tmp/code-server.log 2>&1; "
+            "nohup code-server --bind-addr 0.0.0.0:8080 --auth none /app/horizon "
+            "  >> /tmp/code-server.log 2>&1 &"
+            "\""
+        )
+
+        def run_codeserver():
+            self.log_event("REMOTE-ACCESS", container, "INFO", "Iniciando code-server (sin contraseña)...")
+            code, out, err = self._run(["docker", "exec", "-d", container, "sh", "-c", install_and_run])
+            if code == 0:
+                time.sleep(3)
+                self.root.after(0, lambda: self._show_codeserver_instructions(container, codeserver_url, host_port))
+            else:
+                self.root.after(0, lambda: messagebox.showerror("Acceso Remoto", f"Error al lanzar code-server: {err or 'desconocido'}"))
+
+        threading.Thread(target=run_codeserver, daemon=True).start()
+
+    def _show_codeserver_instructions(self, container: str, codeserver_url: str, host_port: str) -> None:
+        vscode_url = f"vscode://vscode-remote/localhost:{host_port}"
+        msg = (
+            f"✅ code-server activo en '{container}'.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "OPCIÓN A — APP nativa de VS Code:\n"
+            "  1. Instala la extensión 'ms-vscode.remote-server'\n"
+            "     (Ctrl+Shift+X → busca 'Remote - Server')\n"
+            "  2. Ctrl+Shift+P → 'Remote: Connect to Remote Server'\n"
+            f"  3. Introduce la URL: {codeserver_url}\n"
+            "  4. ¡Listo! Editas el código directamente desde la app.\n\n"
+            "OPCIÓN B — Navegador (sin instalar nada):\n"
+            f"  Abre: {codeserver_url}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️  Sin contraseña — cualquiera en la red puede acceder.\n"
+            "    Para parar: apaga el contenedor o reinícialo.\n\n"
+            "Los archivos del tema están en /app/horizon dentro del contenedor.\n"
+            "Cualquier guardado se refleja al instante en el dev server de Shopify."
+        )
+        messagebox.showinfo("Acceso Remoto — code-server", msg)
+
+    def _build_containers_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+
+        table_frame = ttk.Frame(parent)
+        table_frame.grid(row=0, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.rowconfigure(1, weight=0)
+
+        columns = ("name", "state", "health", "port", "protection")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=14, selectmode="extended")
+        self.tree.heading("name", text="Contenedor")
+        self.tree.heading("state", text="Estado")
+        self.tree.heading("health", text="Salud")
+        self.tree.heading("port", text="Puerto")
+        self.tree.heading("protection", text="Proteccion")
+        self.tree.column("name", width=340, anchor="w")
+        self.tree.column("state", width=120, anchor="center")
+        self.tree.column("health", width=120, anchor="center")
+        self.tree.column("port", width=120, anchor="center")
+        self.tree.column("protection", width=320, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.tag_configure("running",   foreground="#059669")
+        self.tree.tag_configure("stopped",   foreground="#ef4444")
+        self.tree.tag_configure("unhealthy", foreground="#d97706")
+
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        xscroll.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        action_row = ttk.Frame(parent)
+        action_row.grid(row=1, column=0, sticky="ew", pady=(10, 4))
+
+        ttk.Button(action_row, text="Refrescar", command=self.refresh_everything).pack(side="left", padx=(0, 6))
+        self.container_action_btns = []
+        for _lbl, _cmd in [
+            ("Arrancar seleccionados", self.start_selected),
+            ("Apagar seleccionados",   self.stop_selected),
+            ("Acceso Remoto (code-server)",   self.remote_access_selected),
+            ("Arrancar todos",          self.start_all),
+            ("Apagar todos",            self.stop_all),
+        ]:
+            _btn = ttk.Button(action_row, text=_lbl, command=_cmd)
+            _btn.pack(side="left", padx=6)
+            self.container_action_btns.append(_btn)
+
+    def _build_profiles_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(3, weight=1)
+        top.columnconfigure(4, weight=1)
+
+        ttk.Label(top, text="Almacen:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        scope_combo = ttk.Combobox(
+            top,
+            textvariable=self.profile_scope_var,
+            values=["privado", "remoto"],
+            state="readonly",
+            width=12,
+        )
+        scope_combo.current(0)
+        scope_combo.grid(row=0, column=1, sticky="w")
+        scope_combo.bind("<<ComboboxSelected>>", self.on_profile_scope_changed)
+
+        ttk.Label(top, text="Nombre perfil:").grid(row=0, column=2, sticky="w", padx=(12, 6))
+        ttk.Entry(top, textvariable=self.profile_name_var).grid(row=0, column=3, columnspan=2, sticky="ew")
+
+        ttk.Button(top, text="Guardar/Actualizar", command=self.save_profile).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(8, 0))
+        ttk.Button(top, text="Quitar del perfil", command=self.remove_selected_from_profile).grid(row=1, column=1, sticky="ew", padx=6, pady=(8, 0))
+        ttk.Button(top, text="Eliminar", command=self.delete_profile).grid(row=1, column=2, sticky="ew", padx=6, pady=(8, 0))
+        self.copy_profile_btn = ttk.Button(top, text="Copiar a remoto", command=self.copy_selected_profile)
+        self.copy_profile_btn.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
+        self.profile_action_btns = []
+        _btn_start = ttk.Button(top, text="Arrancar perfil", command=lambda: self.run_selected_profile("start"))
+        _btn_start.grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
+        self.profile_action_btns.append(_btn_start)
+        _btn_stop = ttk.Button(top, text="Apagar perfil", command=lambda: self.run_selected_profile("stop"))
+        _btn_stop.grid(row=2, column=2, sticky="ew", padx=6, pady=(6, 0))
+        self.profile_action_btns.append(_btn_stop)
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        self.profiles_header_label = ttk.Label(body, text="Perfiles privados")
+        self.profiles_header_label.grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="Contenedores del perfil").grid(row=0, column=1, sticky="w")
+
+        self.profiles_listbox = tk.Listbox(
+            body, exportselection=False,
+            bg="#ffffff", fg="#0f172a", selectbackground="#dbeafe", selectforeground="#1e40af",
+            relief="solid", borderwidth=1, highlightthickness=0, font=("Segoe UI", 10),
+            activestyle="none",
+        )
+        self.profiles_listbox.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.profiles_listbox.bind("<<ListboxSelect>>", self.on_profile_selected)
+
+        self.profile_containers_listbox = tk.Listbox(
+            body, selectmode="extended", exportselection=False,
+            bg="#ffffff", fg="#0f172a", selectbackground="#dbeafe", selectforeground="#1e40af",
+            relief="solid", borderwidth=1, highlightthickness=0, font=("Segoe UI", 10),
+            activestyle="none",
+        )
+        self.profile_containers_listbox.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+
+        bottom = ttk.Frame(parent)
+        bottom.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(bottom, text="Refrescar perfiles", command=lambda: self.refresh_profiles_ui(force=True)).pack(side="left")
+        ttk.Button(bottom, text="Limpiar seleccion", command=self.clear_profile_editor).pack(side="left", padx=6)
+        self.profiles_loading_label = ttk.Label(bottom, text="", style="Muted.TLabel")
+        self.profiles_loading_label.pack(side="left", padx=(10, 0))
+
+    def _build_networks_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(0, weight=1)
+
+        ttk.Button(top, text="Refrescar networks", command=self.refresh_networks).pack(side="left")
+        ttk.Label(top, text="Driver:").pack(side="left", padx=(14, 6))
+        ttk.Combobox(
+            top,
+            textvariable=self.network_driver_var,
+            values=["bridge", "overlay", "macvlan", "ipvlan"],
+            state="readonly",
+            width=10,
+        ).pack(side="left")
+        ttk.Button(top, text="Crear network", command=self.create_network).pack(side="left", padx=6)
+        ttk.Button(top, text="Renombrar network", command=self.rename_network).pack(side="left", padx=6)
+        ttk.Button(top, text="Eliminar network", command=self.delete_network).pack(side="left", padx=6)
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        ttk.Label(body, text="Networks").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="Contenedores conectados").grid(row=0, column=1, sticky="w")
+
+        self.networks_tree = ttk.Treeview(body, columns=("name", "driver", "count"), show="headings", height=12)
+        self.networks_tree.heading("name", text="Network")
+        self.networks_tree.heading("driver", text="Driver")
+        self.networks_tree.heading("count", text="Contenedores")
+        self.networks_tree.column("name", width=240, anchor="w")
+        self.networks_tree.column("driver", width=110, anchor="center")
+        self.networks_tree.column("count", width=110, anchor="center")
+        self.networks_tree.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.networks_tree.bind("<<TreeviewSelect>>", self.on_network_selected)
+
+        networks_y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.networks_tree.yview)
+        networks_y_scroll.grid(row=1, column=0, sticky="nse", padx=(0, 6))
+        networks_x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.networks_tree.xview)
+        networks_x_scroll.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
+        self.networks_tree.configure(yscrollcommand=networks_y_scroll.set, xscrollcommand=networks_x_scroll.set)
+
+        self.network_containers_listbox = tk.Listbox(
+            body, exportselection=False,
+            bg="#ffffff", fg="#0f172a", selectbackground="#dbeafe", selectforeground="#1e40af",
+            relief="solid", borderwidth=1, highlightthickness=0, font=("Segoe UI", 10),
+            activestyle="none",
+        )
+        self.network_containers_listbox.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.network_containers_listbox.bind("<Button-1>", lambda _e: "break")
+        self.network_containers_listbox.bind("<B1-Motion>", lambda _e: "break")
+        self.network_containers_listbox.bind("<ButtonRelease-1>", lambda _e: "break")
+        self.network_containers_listbox.bind("<Key>", lambda _e: "break")
+
+        action = ttk.Frame(parent)
+        action.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        action.columnconfigure(1, weight=1)
+
+        ttk.Label(action, text="Contenedor objetivo:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.network_container_combo = ttk.Combobox(
+            action,
+            textvariable=self.network_container_var,
+            state="readonly",
+            values=[],
+        )
+        self.network_container_combo.grid(row=0, column=1, sticky="ew")
+        ttk.Button(action, text="Conectar", command=self.connect_container_to_network).grid(row=0, column=2, padx=6)
+        ttk.Button(action, text="Desconectar", command=self.disconnect_container_from_network).grid(row=0, column=3)
+
+        ttk.Label(action, text="Seleccion multiple:").grid(row=1, column=0, sticky="nw", padx=(0, 6), pady=(8, 0))
+        self.network_targets_listbox = tk.Listbox(
+            action,
+            selectmode="extended",
+            exportselection=False,
+            height=5,
+            bg="#ffffff",
+            fg="#0f172a",
+            selectbackground="#dbeafe",
+            selectforeground="#1e40af",
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=0,
+            font=("Segoe UI", 10),
+            activestyle="none",
+        )
+        self.network_targets_listbox.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+
+    def _build_volumes_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(0, weight=1)
+
+        ttk.Button(top, text="Refrescar volumes", command=self.refresh_volumes).pack(side="left")
+        ttk.Label(top, text="Driver:").pack(side="left", padx=(14, 6))
+        ttk.Combobox(
+            top,
+            textvariable=self.volume_driver_var,
+            values=["local", "nfs", "tmpfs"],
+            state="readonly",
+            width=10,
+        ).pack(side="left")
+        ttk.Button(top, text="Crear volume", command=self.create_volume).pack(side="left", padx=6)
+        ttk.Button(top, text="Inspeccionar", command=self.inspect_selected_volumes).pack(side="left", padx=6)
+        ttk.Button(top, text="Clonar volume", command=self.clone_volume).pack(side="left", padx=6)
+        ttk.Button(top, text="Vaciar volume", command=self.clear_volume_contents).pack(side="left", padx=6)
+        ttk.Button(top, text="Eliminar volume", command=self.delete_selected_volumes).pack(side="left", padx=6)
+        ttk.Button(top, text="Prune volumes", command=self.prune_volumes).pack(side="left", padx=6)
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        ttk.Label(body, text="Volumes").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="Contenedores que usan el volume").grid(row=0, column=1, sticky="w")
+
+        self.volumes_tree = ttk.Treeview(
+            body,
+            columns=("name", "driver", "scope", "inuse", "mountpoint"),
+            show="headings",
+            height=12,
+            selectmode="extended",
+        )
+        self.volumes_tree.heading("name", text="Volume")
+        self.volumes_tree.heading("driver", text="Driver")
+        self.volumes_tree.heading("scope", text="Scope")
+        self.volumes_tree.heading("inuse", text="Uso")
+        self.volumes_tree.heading("mountpoint", text="Mountpoint")
+        self.volumes_tree.column("name", width=220, anchor="w")
+        self.volumes_tree.column("driver", width=110, anchor="center")
+        self.volumes_tree.column("scope", width=100, anchor="center")
+        self.volumes_tree.column("inuse", width=90, anchor="center")
+        self.volumes_tree.column("mountpoint", width=330, anchor="w")
+        self.volumes_tree.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.volumes_tree.bind("<<TreeviewSelect>>", self.on_volume_selected)
+
+        volumes_y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.volumes_tree.yview)
+        volumes_y_scroll.grid(row=1, column=0, sticky="nse", padx=(0, 6))
+        volumes_x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.volumes_tree.xview)
+        volumes_x_scroll.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
+        self.volumes_tree.configure(yscrollcommand=volumes_y_scroll.set, xscrollcommand=volumes_x_scroll.set)
+
+        self.volume_containers_listbox = tk.Listbox(
+            body,
+            exportselection=False,
+            bg="#ffffff",
+            fg="#0f172a",
+            selectbackground="#dbeafe",
+            selectforeground="#1e40af",
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=0,
+            font=("Segoe UI", 10),
+            activestyle="none",
+        )
+        self.volume_containers_listbox.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.volume_containers_listbox.bind("<Button-1>", lambda _e: "break")
+        self.volume_containers_listbox.bind("<B1-Motion>", lambda _e: "break")
+        self.volume_containers_listbox.bind("<ButtonRelease-1>", lambda _e: "break")
+        self.volume_containers_listbox.bind("<Key>", lambda _e: "break")
+
+    def _build_history_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(3, weight=1)
+
+        ttk.Label(top, text="Nivel:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        level_combo = ttk.Combobox(
+            top,
+            textvariable=self.history_level_var,
+            values=["TODOS", "OK", "ERROR", "WARN", "INFO"],
+            state="readonly",
+            width=12,
+        )
+        level_combo.current(0)
+        level_combo.grid(row=0, column=1, sticky="w")
+        level_combo.bind("<<ComboboxSelected>>", self.apply_history_filter)
+
+        ttk.Label(top, text="Buscar:").grid(row=0, column=2, sticky="w", padx=(12, 6))
+        search = ttk.Entry(top, textvariable=self.history_search_var)
+        search.grid(row=0, column=3, sticky="ew")
+        search.bind("<KeyRelease>", self.apply_history_filter)
+
+        ttk.Button(top, text="Refrescar", command=self.refresh_history).grid(row=0, column=4, padx=6)
+        ttk.Button(top, text="Limpiar filtro", command=self.clear_history_filters).grid(row=0, column=5, padx=(0, 6))
+        ttk.Button(top, text="Copiar visible", command=self.copy_visible_history).grid(row=0, column=6)
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self.history_text = tk.Text(
+            body,
+            wrap="none",
+            height=16,
+            bg="#ffffff",
+            fg="#1f2937",
+            insertbackground="#1f2937",
+            relief="flat",
+            borderwidth=1,
+            selectbackground="#bfdbfe",
+            highlightthickness=0,
+        )
+        self.history_text.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.history_text.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.history_text.configure(yscrollcommand=y_scroll.set)
+
+        x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.history_text.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        self.history_text.configure(xscrollcommand=x_scroll.set)
+
+        self.history_text.configure(state="disabled")
+
+    def _build_logs_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(1, weight=1)
+
+        ttk.Label(top, text="Contenedor:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.log_container_combo = ttk.Combobox(
+            top,
+            textvariable=self.log_container_var,
+            state="readonly",
+            values=[],
+        )
+        self.log_container_combo.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(top, text="Lineas:").grid(row=0, column=2, sticky="w", padx=(12, 6))
+        self.log_lines_spinbox = tk.Spinbox(top, from_=10, to=5000, increment=10, textvariable=self.log_lines_var, width=8)
+        self.log_lines_spinbox.grid(row=0, column=3, sticky="w")
+        self.log_lines_spinbox.configure(
+            background="#ffffff",
+            foreground="#1f2937",
+            insertbackground="#1f2937",
+            relief="solid",
+            borderwidth=1,
+        )
+
+        ttk.Button(top, text="Ver logs", command=self.fetch_logs).grid(row=0, column=4, padx=6)
+        ttk.Checkbutton(top, text="Seguir (-f)", variable=self.log_follow_var, command=self.on_follow_mode_toggled).grid(row=0, column=5, padx=6)
+        ttk.Checkbutton(top, text="Auto-refresco", variable=self.log_auto_refresh_var, command=self.toggle_logs_auto_refresh).grid(row=0, column=6, padx=6)
+        ttk.Button(top, text="Exportar txt", command=self.export_visible_logs).grid(row=0, column=7, padx=(6, 0))
+        ttk.Button(top, text="Copiar visible", command=self.copy_visible_logs).grid(row=0, column=8, padx=(6, 0))
+
+        body = ttk.Frame(parent)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self.logs_text = tk.Text(
+            body,
+            wrap="none",
+            height=16,
+            bg="#ffffff",
+            fg="#1f2937",
+            insertbackground="#1f2937",
+            relief="flat",
+            borderwidth=1,
+            selectbackground="#bfdbfe",
+            highlightthickness=0,
+        )
+        self.logs_text.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.logs_text.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.logs_text.configure(yscrollcommand=y_scroll.set)
+
+        x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.logs_text.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        self.logs_text.configure(xscrollcommand=x_scroll.set)
+
+        self.logs_text.insert("1.0", "Selecciona un contenedor y pulsa 'Ver logs'.")
+        self.logs_text.configure(state="disabled")
+
+    def _run(self, args: list[str]) -> tuple[int, str, str]:
+        if args and args[0].lower() == "docker" and self._should_use_docker_sdk():
+            return self._run_docker_via_sdk(args)
+
+        final_args = self._build_docker_command(args)
+        process = subprocess.run(
+            final_args,
+            capture_output=True,
+            text=True,
+            cwd=self.tools_dir,
+            shell=False,
+            env=self._docker_process_env(),
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return process.returncode, process.stdout.strip(), process.stderr.strip()
+
+    def _docker_process_env(self, force_host: str | None = None) -> dict[str, str]:
+        env = os.environ.copy()
+        host = force_host
+        if not host and self.docker_mode == "remote" and self.docker_host:
+            host = self.docker_host
+        if host:
+            env["DOCKER_HOST"] = host
+            env.pop("DOCKER_CONTEXT", None)
+            # Evita errores de tipo CreateFile cuando quedan rutas TLS invalidas en variables globales.
+            env.pop("DOCKER_TLS_VERIFY", None)
+            env.pop("DOCKER_CERT_PATH", None)
+            env.pop("DOCKER_TLS", None)
+        return env
+
+    def _detect_docker_cli(self) -> bool:
+        try:
+            process = subprocess.run(
+                ["where", "docker"],
+                capture_output=True,
+                text=True,
+                cwd=self.tools_dir,
+                shell=False,
+                env=self._docker_process_env(),
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return process.returncode == 0
+        except Exception:
+            return False
+
+    def _should_use_docker_sdk(self) -> bool:
+        if self.docker_cli_available is None:
+            self.docker_cli_available = self._detect_docker_cli()
+        return not bool(self.docker_cli_available)
+
+    def _get_docker_sdk_client(self, host_override: str | None = None, timeout_seconds: int | None = 5) -> object | None:
+        if docker is None:
+            return None
+
+        is_short_timeout = timeout_seconds is not None and timeout_seconds <= 5
+        now = time.time()
+        if (
+            host_override is None
+            and is_short_timeout
+            and self.docker_sdk_client is None
+            and self._sdk_last_fail_at > 0
+            and (now - self._sdk_last_fail_at) < self._sdk_retry_cooldown_sec
+        ):
+            return None
+
+        if host_override is None and is_short_timeout and self.docker_sdk_client is not None:
+            return self.docker_sdk_client
+
+        base_url = host_override
+        if base_url is None and self.docker_mode == "remote" and self.docker_host:
+            base_url = self.docker_host
+
+        try:
+            if base_url:
+                client = docker.DockerClient(base_url=base_url, timeout=timeout_seconds)
+            else:
+                client = docker.from_env(timeout=timeout_seconds)
+            client.ping()
+            if host_override is None and is_short_timeout:
+                self.docker_sdk_client = client
+                self._sdk_last_fail_at = 0.0
+            return client
+        except Exception:
+            if host_override is None and is_short_timeout:
+                self._sdk_last_fail_at = time.time()
+            return None
+
+    def _ports_mapping_text(self, container: object) -> str:
+        try:
+            ports = (container.attrs.get("NetworkSettings", {}) or {}).get("Ports", {}) or {}
+            parts: list[str] = []
+            for cport, bindings in ports.items():
+                if not bindings:
+                    continue
+                for item in bindings:
+                    host_ip = item.get("HostIp", "0.0.0.0")
+                    host_port = item.get("HostPort", "")
+                    parts.append(f"{host_ip}:{host_port}->{cport}")
+            return ", ".join(parts)
+        except Exception:
+            return ""
+
+    def _status_text(self, container: object) -> str:
+        status = (getattr(container, "status", "") or "").lower()
+        if status == "running":
+            return "Up"
+        if status == "created":
+            return "Created"
+        if status == "paused":
+            return "Paused"
+        if status == "restarting":
+            return "Restarting"
+        return "Exited"
+
+    def _render_ps_format_line(self, container: object, template: str) -> str:
+        image = ""
+        command = ""
+        try:
+            tags = getattr(container.image, "tags", []) or []
+            image = tags[0] if tags else (container.attrs.get("Config", {}) or {}).get("Image", "")
+        except Exception:
+            image = ""
+
+        try:
+            cfg = container.attrs.get("Config", {}) or {}
+            cmd = cfg.get("Cmd")
+            if isinstance(cmd, list):
+                command = " ".join(str(x) for x in cmd)
+            else:
+                command = str(cmd or "")
+        except Exception:
+            command = ""
+
+        name = getattr(container, "name", "")
+        status = self._status_text(container)
+        ports = self._ports_mapping_text(container)
+        out = template
+        out = out.replace("{{.Names}}", name)
+        out = out.replace("{{.Status}}", status)
+        out = out.replace("{{.Image}}", image)
+        out = out.replace("{{.Ports}}", ports)
+        out = out.replace("{{.Command}}", command)
+        return out
+
+    def _run_sdk_cp_helper_subprocess(self, host_override: str | None, src: str, dst: str) -> tuple[int, str, str]:
+        direction = "from" if _looks_like_container_spec(src) else "to"
+        # En modo compilado (PyInstaller), argv[1] debe ser --wpu-sdk-cp
+        # para evitar que se abra una segunda instancia de la UI.
+        helper_args = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            helper_args.append(os.path.abspath(__file__))
+        helper_args.extend([
+            "--wpu-sdk-cp",
+            direction,
+            host_override or "",
+            src,
+            dst,
+        ])
+        process = subprocess.run(
+            helper_args,
+            capture_output=True,
+            text=True,
+            cwd=self.tools_dir,
+            shell=False,
+            env=self._docker_process_env(force_host=host_override),
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return process.returncode, process.stdout.strip(), process.stderr.strip()
+
+    def _run_docker_via_sdk(self, args: list[str]) -> tuple[int, str, str]:
+        docker_args = args[1:]
+        host_override: str | None = None
+        if len(docker_args) >= 2 and docker_args[0] == "-H":
+            host_override = docker_args[1]
+            docker_args = docker_args[2:]
+        if not docker_args:
+            return 1, "", "Comando docker vacio"
+
+        cmd = docker_args[0]
+        rest = docker_args[1:]
+
+        # Para operaciones largas (import/export/copia/exec/logs) evitar
+        # timeout fijo de lectura, ya que depende del tamano de datos y rendimiento del host remoto.
+        if cmd in {"cp", "exec", "run", "logs"}:
+            try:
+                client.api.timeout = None
+            except Exception:
+                pass
+
+        op_timeout: int | None = 5
+        if cmd in {"cp", "exec", "run", "logs"}:
+            op_timeout = None
+        elif cmd in {"start", "stop", "restart", "rm", "network", "volume"}:
+            op_timeout = 30
+
+        client = self._get_docker_sdk_client(host_override=host_override, timeout_seconds=op_timeout)
+        if client is None:
+            return 1, "", "Docker SDK no disponible. Instala paquete Python 'docker'."
+
+        try:
+            if cmd == "info":
+                info = client.api.info()
+                return 0, str(info.get("ServerVersion", "OK")), ""
+
+            if cmd == "ps":
+                all_flag = "-a" in rest or "-aq" in rest
+                quiet = "-q" in rest or "-aq" in rest
+                fmt = ""
+                if "--format" in rest:
+                    idx = rest.index("--format")
+                    if idx + 1 < len(rest):
+                        fmt = rest[idx + 1]
+                containers = client.containers.list(all=all_flag)
+                if quiet:
+                    return 0, "\n".join(c.id for c in containers), ""
+                if fmt:
+                    lines = [self._render_ps_format_line(c, fmt) for c in containers]
+                    return 0, "\n".join(lines), ""
+                return 0, "\n".join(c.name for c in containers), ""
+
+            if cmd in {"start", "stop", "restart"}:
+                if not rest:
+                    return 1, "", f"docker {cmd}: faltan contenedores"
+                for cname in rest:
+                    cont = client.containers.get(cname)
+                    if cmd == "start":
+                        cont.start()
+                    elif cmd == "stop":
+                        cont.stop(timeout=10)
+                    else:
+                        cont.restart(timeout=10)
+                return 0, "", ""
+
+            if cmd == "rename":
+                if len(rest) != 2:
+                    return 1, "", "docker rename: argumentos invalidos"
+                cont = client.containers.get(rest[0])
+                cont.rename(rest[1])
+                return 0, "", ""
+
+            if cmd == "rm":
+                force = "-f" in rest
+                names = [x for x in rest if x != "-f"]
+                for cname in names:
+                    cont = client.containers.get(cname)
+                    cont.remove(force=force)
+                return 0, "", ""
+
+            if cmd == "network":
+                if not rest:
+                    return 1, "", "docker network: falta subcomando"
+                sub = rest[0]
+                sub_args = rest[1:]
+                if sub == "ls":
+                    fmt = ""
+                    if "--format" in sub_args:
+                        idx = sub_args.index("--format")
+                        if idx + 1 < len(sub_args):
+                            fmt = sub_args[idx + 1]
+                    lines: list[str] = []
+                    for net in client.networks.list():
+                        name = net.name
+                        driver = (net.attrs.get("Driver", "") if getattr(net, "attrs", None) else "")
+                        if fmt:
+                            line = fmt.replace("{{.Name}}", name).replace("{{.Driver}}", driver)
+                        else:
+                            line = f"{name}|{driver}"
+                        lines.append(line)
+                    return 0, "\n".join(lines), ""
+                if sub == "create":
+                    driver = "bridge"
+                    name = ""
+                    if "--driver" in sub_args:
+                        idx = sub_args.index("--driver")
+                        if idx + 1 < len(sub_args):
+                            driver = sub_args[idx + 1]
+                            rem = [x for i, x in enumerate(sub_args) if i not in {idx, idx + 1}]
+                            name = rem[-1] if rem else ""
+                    else:
+                        name = sub_args[-1] if sub_args else ""
+                    if not name:
+                        return 1, "", "docker network create: falta nombre"
+                    net = client.networks.create(name=name, driver=driver)
+                    return 0, net.id, ""
+                if sub == "rm":
+                    for net_name in sub_args:
+                        client.networks.get(net_name).remove()
+                    return 0, "", ""
+                if sub == "connect":
+                    if len(sub_args) < 2:
+                        return 1, "", "docker network connect: argumentos invalidos"
+                    client.networks.get(sub_args[0]).connect(sub_args[1])
+                    return 0, "", ""
+                if sub == "disconnect":
+                    if len(sub_args) < 2:
+                        return 1, "", "docker network disconnect: argumentos invalidos"
+                    client.networks.get(sub_args[0]).disconnect(sub_args[1])
+                    return 0, "", ""
+                return 1, "", f"Subcomando network no soportado: {sub}"
+
+            if cmd == "volume":
+                if not rest:
+                    return 1, "", "docker volume: falta subcomando"
+                sub = rest[0]
+                sub_args = rest[1:]
+                names = [x for x in sub_args if x != "-f"]
+                if sub == "ls":
+                    fmt = ""
+                    if "--format" in sub_args:
+                        idx = sub_args.index("--format")
+                        if idx + 1 < len(sub_args):
+                            fmt = sub_args[idx + 1]
+                    lines: list[str] = []
+                    for vol in client.volumes.list():
+                        attrs = getattr(vol, "attrs", {}) or {}
+                        name = getattr(vol, "name", "")
+                        driver = str(attrs.get("Driver", ""))
+                        scope = str(attrs.get("Scope", ""))
+                        mountpoint = str(attrs.get("Mountpoint", ""))
+                        if fmt:
+                            line = fmt
+                            line = line.replace("{{.Name}}", name)
+                            line = line.replace("{{.Driver}}", driver)
+                            line = line.replace("{{.Scope}}", scope)
+                            line = line.replace("{{.Mountpoint}}", mountpoint)
+                        else:
+                            line = f"{name}|{driver}|{scope}|{mountpoint}"
+                        lines.append(line)
+                    return 0, "\n".join(lines), ""
+                if sub == "create":
+                    driver = "local"
+                    if "--driver" in sub_args:
+                        idx = sub_args.index("--driver")
+                        if idx + 1 < len(sub_args):
+                            driver = sub_args[idx + 1]
+                            names = [x for i, x in enumerate(sub_args) if i not in {idx, idx + 1}]
+                    out: list[str] = []
+                    for name in names:
+                        v = client.volumes.create(name=name, driver=driver)
+                        out.append(v.name)
+                    return 0, "\n".join(out), ""
+                if sub == "rm":
+                    for name in names:
+                        client.volumes.get(name).remove(force=True)
+                    return 0, "", ""
+                if sub == "inspect":
+                    payload: list[dict[str, object]] = []
+                    for name in names:
+                        payload.append(client.volumes.get(name).attrs)
+                    return 0, json.dumps(payload, ensure_ascii=False, indent=2), ""
+                if sub == "prune":
+                    remove_all = "--all" in sub_args or "-a" in sub_args
+                    if remove_all:
+                        pruned = client.api.prune_volumes(filters={"all": True})
+                    else:
+                        pruned = client.volumes.prune()
+                    return 0, json.dumps(pruned, ensure_ascii=False, indent=2), ""
+                return 1, "", f"Subcomando volume no soportado: {sub}"
+
+            if cmd == "inspect":
+                if len(rest) >= 3 and rest[0] == "--format" and rest[1] == "{{.State.Running}}":
+                    cont = client.containers.get(rest[2])
+                    cont.reload()
+                    running = (cont.attrs.get("State", {}) or {}).get("Running", False)
+                    return 0, ("true" if running else "false"), ""
+                if len(rest) >= 3 and rest[0] == "--format" and rest[1] == "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}":
+                    cont = client.containers.get(rest[2])
+                    cont.reload()
+                    nets = ((cont.attrs.get("NetworkSettings", {}) or {}).get("Networks", {}) or {}).keys()
+                    return 0, " ".join(str(n) for n in nets), ""
+                if len(rest) >= 3 and rest[0] == "--format" and rest[1] == "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}":
+                    cont = client.containers.get(rest[2])
+                    cont.reload()
+                    mounts = cont.attrs.get("Mounts", []) or []
+                    names: list[str] = []
+                    for mount in mounts:
+                        if str(mount.get("Type", "")) == "volume":
+                            name = str(mount.get("Name", "")).strip()
+                            if name:
+                                names.append(name)
+                    return 0, " ".join(names), ""
+                return 1, "", "docker inspect: formato no soportado"
+
+            if cmd == "port":
+                if not rest:
+                    return 1, "", "docker port: falta contenedor"
+                cont = client.containers.get(rest[0])
+                ports = (cont.attrs.get("NetworkSettings", {}) or {}).get("Ports", {}) or {}
+                if len(rest) >= 2:
+                    requested = rest[1]
+                    key = requested if "/" in requested else f"{requested}/tcp"
+                    binds = ports.get(key) or []
+                    lines = [f"{b.get('HostIp', '0.0.0.0')}:{b.get('HostPort', '')}" for b in binds]
+                    return 0, "\n".join(lines), ""
+                lines: list[str] = []
+                for cport, binds in ports.items():
+                    if not binds:
+                        continue
+                    for b in binds:
+                        lines.append(f"{cport} -> {b.get('HostIp', '0.0.0.0')}:{b.get('HostPort', '')}")
+                return 0, "\n".join(lines), ""
+
+            if cmd == "exec":
+                idx = 0
+                user = None
+                if len(rest) >= 3 and rest[0] == "-u":
+                    user = rest[1]
+                    idx = 2
+                if idx >= len(rest):
+                    return 1, "", "docker exec: falta contenedor"
+                cont_name = rest[idx]
+                exec_cmd = rest[idx + 1 :]
+                if not exec_cmd:
+                    return 1, "", "docker exec: falta comando"
+
+                cont = client.containers.get(cont_name)
+                if exec_cmd == ["env"]:
+                    env_list = (cont.attrs.get("Config", {}) or {}).get("Env", []) or []
+                    return 0, "\n".join(env_list), ""
+
+                cmd_value: object
+                if len(exec_cmd) == 1:
+                    cmd_value = exec_cmd[0]
+                else:
+                    cmd_value = exec_cmd
+                result = cont.exec_run(cmd=cmd_value, user=user, stdout=True, stderr=True)
+                exit_code = int(result.exit_code)
+                output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, (bytes, bytearray)) else str(result.output)
+                if exit_code == 0:
+                    return 0, output.strip(), ""
+                return exit_code, "", output.strip() or "Fallo en docker exec"
+
+            if cmd == "cp":
+                if len(rest) != 2:
+                    return 1, "", "docker cp: argumentos invalidos"
+                src, dst = rest
+                if _looks_like_container_spec(src) or _looks_like_container_spec(dst):
+                    return self._run_sdk_cp_helper_subprocess(host_override=host_override, src=src, dst=dst)
+                return 1, "", "docker cp: direccion no soportada"
+
+            if cmd == "logs":
+                tail = 100
+                follow = False
+                i = 0
+                while i < len(rest):
+                    token = rest[i]
+                    if token == "--tail" and i + 1 < len(rest):
+                        tail = int(rest[i + 1])
+                        i += 2
+                        continue
+                    if token == "-f":
+                        follow = True
+                        i += 1
+                        continue
+                    break
+                if i >= len(rest):
+                    return 1, "", "docker logs: falta contenedor"
+                cont = client.containers.get(rest[i])
+                if follow:
+                    return 1, "", "docker logs -f no soportado en este modo"
+                data = cont.logs(stdout=True, stderr=True, tail=tail)
+                return 0, data.decode("utf-8", errors="replace").strip(), ""
+
+            if cmd == "run":
+                detach = False
+                auto_remove = False
+                name = None
+                network = None
+                user = None
+                entrypoint = None
+                environment: dict[str, str] = {}
+                volumes: dict[str, dict[str, str]] = {}
+                ports: dict[str, object] = {}
+
+                i = 0
+                while i < len(rest):
+                    token = rest[i]
+                    if token == "-d":
+                        detach = True
+                        i += 1
+                        continue
+                    if token == "--rm":
+                        auto_remove = True
+                        i += 1
+                        continue
+                    if token == "--name" and i + 1 < len(rest):
+                        name = rest[i + 1]
+                        i += 2
+                        continue
+                    if token == "--network" and i + 1 < len(rest):
+                        network = rest[i + 1]
+                        i += 2
+                        continue
+                    if token in {"-u", "--user"} and i + 1 < len(rest):
+                        user = rest[i + 1]
+                        i += 2
+                        continue
+                    if token == "--entrypoint" and i + 1 < len(rest):
+                        entrypoint = rest[i + 1]
+                        i += 2
+                        continue
+                    if token == "-e" and i + 1 < len(rest):
+                        kv = rest[i + 1]
+                        if "=" in kv:
+                            k, v = kv.split("=", 1)
+                            environment[k] = v
+                        i += 2
+                        continue
+                    if token == "-v" and i + 1 < len(rest):
+                        vm = rest[i + 1]
+                        parts = vm.split(":", 2)
+                        if len(parts) >= 2:
+                            src, bind = parts[0], parts[1]
+                            mode = parts[2] if len(parts) == 3 else "rw"
+                            volumes[src] = {"bind": bind, "mode": mode}
+                        i += 2
+                        continue
+                    if token == "-p" and i + 1 < len(rest):
+                        pm = rest[i + 1]
+                        if ":" in pm:
+                            host, cont_port = pm.split(":", 1)
+                            key = cont_port if "/" in cont_port else f"{cont_port}/tcp"
+                            ports[key] = int(host)
+                        i += 2
+                        continue
+                    break
+
+                if i >= len(rest):
+                    return 1, "", "docker run: falta imagen"
+                image = rest[i]
+                command = rest[i + 1 :] if (i + 1) < len(rest) else None
+                if isinstance(command, list) and len(command) == 1:
+                    command = command[0]
+
+                result = client.containers.run(
+                    image,
+                    command=command,
+                    detach=detach,
+                    remove=auto_remove,
+                    name=name,
+                    network=network,
+                    user=user,
+                    entrypoint=entrypoint,
+                    environment=environment or None,
+                    volumes=volumes or None,
+                    ports=ports or None,
+                )
+                if detach:
+                    return 0, getattr(result, "id", ""), ""
+                if isinstance(result, (bytes, bytearray)):
+                    return 0, result.decode("utf-8", errors="replace").strip(), ""
+                return 0, str(result), ""
+
+            return 1, "", f"Comando docker no soportado por SDK: {cmd}"
+        except NotFound as exc:
+            return 1, "", str(exc)
+        except APIError as exc:
+            return 1, "", str(exc)
+        except DockerException as exc:
+            return 1, "", str(exc)
+        except Exception as exc:
+            return 1, "", str(exc)
+        finally:
+            self._schedule_helper_container_cleanup()
+
+    def _build_docker_command(self, args: list[str]) -> list[str]:
+        if not args:
+            return args
+        if args[0].lower() != "docker":
+            return args
+        if self.docker_mode != "remote" or not self.docker_host:
+            return args
+        return ["docker", "-H", self.docker_host, *args[1:]]
+
+    def _prompt_startup_connection_mode(self) -> bool:
+        self.discovered_lan_hosts = self._discover_lan_hosts()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Modo Docker")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        initial_mode = self.docker_mode if self.docker_mode in {"local", "remote"} else "local"
+        current_host = self.docker_host
+        if current_host.startswith("tcp://"):
+            current_host = current_host[6:]
+        elif current_host.startswith("http://"):
+            current_host = current_host[7:]
+        elif current_host.startswith("https://"):
+            current_host = current_host[8:]
+
+        mode_var = tk.StringVar(value=initial_mode)
+        lan_default = ""
+        if current_host and current_host in self.discovered_lan_hosts:
+            lan_default = current_host
+        elif self.discovered_lan_hosts:
+            lan_default = self.discovered_lan_hosts[0]
+        lan_var = tk.StringVar(value=lan_default)
+        manual_var = tk.StringVar(value=current_host if initial_mode == "remote" else "")
+        result = {"accepted": False}
+
+        body = ttk.Frame(dialog, padding=14)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            body,
+            text="Selecciona como quieres conectar con Docker",
+            style="Title.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            body,
+            text="Local usa Docker Desktop en este equipo. Remoto permite host LAN o dominio/IP publico.",
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 10))
+
+        mode_box = ttk.Frame(body)
+        mode_box.grid(row=2, column=0, sticky="w")
+        ttk.Radiobutton(mode_box, text="Modo local", value="local", variable=mode_var).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(mode_box, text="Modo remoto", value="remote", variable=mode_var).grid(row=0, column=1, sticky="w", padx=(16, 0))
+
+        remote_frame = ttk.LabelFrame(body, text="Destino remoto", padding=10)
+        remote_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        remote_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(remote_frame, text="Host LAN detectado:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
+        lan_combo = ttk.Combobox(remote_frame, textvariable=lan_var, state="readonly", values=self.discovered_lan_hosts)
+        lan_combo.grid(row=0, column=1, sticky="ew", pady=(0, 6))
+
+        ttk.Label(remote_frame, text="Dominio/IP manual:").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        manual_entry = ttk.Entry(remote_frame, textvariable=manual_var)
+        manual_entry.grid(row=1, column=1, sticky="ew")
+
+        ttk.Label(
+            remote_frame,
+            text="Formato: 192.168.1.50, 192.168.1.50:2375, mi-dominio.com o tcp://host:puerto",
+            style="Muted.TLabel",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=4, column=0, sticky="e", pady=(12, 0))
+
+        def refresh_remote_controls(*_args: object) -> None:
+            is_remote = mode_var.get() == "remote"
+            lan_state = "readonly" if is_remote and self.discovered_lan_hosts else "disabled"
+            lan_combo.configure(state=lan_state)
+            manual_entry.configure(state="normal" if is_remote else "disabled")
+
+        def accept_mode() -> None:
+            selected_mode = mode_var.get()
+            if selected_mode == "local":
+                self.docker_mode = "local"
+                self.docker_host = ""
+                self.docker_sdk_client = None
+                self._sdk_last_fail_at = 0.0
+            else:
+                raw_host = (manual_var.get() or lan_var.get()).strip()
+                normalized = self._normalize_docker_host(raw_host)
+                if not normalized:
+                    messagebox.showwarning(
+                        "Modo remoto",
+                        "Indica un host remoto valido (LAN, dominio o IP publica).",
+                        parent=dialog,
+                    )
+                    return
+                self.docker_mode = "remote"
+                self.docker_host = normalized
+                self.docker_sdk_client = None
+                self._sdk_last_fail_at = 0.0
+
+            result["accepted"] = True
+            dialog.destroy()
+
+        def cancel_mode() -> None:
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Cancelar", style="Ghost.TButton", command=cancel_mode).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="Continuar", style="Accent.TButton", command=accept_mode).grid(row=0, column=1)
+
+        mode_var.trace_add("write", refresh_remote_controls)
+        refresh_remote_controls()
+
+        dialog.protocol("WM_DELETE_WINDOW", cancel_mode)
+        dialog.update_idletasks()
+        self._center_window(dialog)
+        self.root.wait_window(dialog)
+
+        if not result["accepted"]:
+            return False
+
+        if self.docker_mode == "remote":
+            self.status_var.set(f"Docker remoto: {self.docker_host}")
+        else:
+            self.status_var.set("Docker local: comprobando...")
+        self._update_connection_mode_badge()
+        return True
+
+    def change_connection_mode(self) -> None:
+        old_mode = self.docker_mode
+        old_host = self.docker_host
+
+        if not self._prompt_startup_connection_mode():
+            return
+
+        if old_mode == self.docker_mode and old_host == self.docker_host:
+            return
+
+        self.docker_sdk_client = None
+        self._sdk_last_fail_at = 0.0
+
+        if self.docker_mode == "remote":
+            detail = f"Modo remoto activo: {self.docker_host}"
+            self.log_event("DOCKER", "modo", "INFO", f"Cambio de modo a remoto ({self.docker_host})")
+        else:
+            detail = "Modo local activo"
+            self.log_event("DOCKER", "modo", "INFO", "Cambio de modo a local")
+
+        self.refresh_history()
+        self.refresh_everything()
+        messagebox.showinfo("Modo Docker", detail)
+
+    def _normalize_docker_host(self, raw_host: str) -> str:
+        host = raw_host.strip()
+        if not host:
+            return ""
+
+        host = host.replace(" ", "")
+        if host.startswith("http://"):
+            host = f"tcp://{host[7:]}"
+        elif host.startswith("https://"):
+            host = f"tcp://{host[8:]}"
+
+        if host.startswith("tcp://") or host.startswith("ssh://") or host.startswith("npipe://"):
+            return host
+
+        if ":" not in host.rsplit("]", 1)[-1]:
+            detected_port = self._pick_remote_docker_port(host)
+            host = f"{host}:{detected_port}"
+
+        return f"tcp://{host}"
+
+    def _is_tcp_open(self, host: str, port: int, timeout: float = 0.8) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _pick_remote_docker_port(self, host: str) -> int:
+        # Prioriza 2375 por compatibilidad histórica; si no responde y 2376 sí, usa 2376.
+        if self._is_tcp_open(host, 2375):
+            return 2375
+        if self._is_tcp_open(host, 2376):
+            return 2376
+        return 2375
+
+    def _discover_lan_hosts(self) -> list[str]:
+        candidates: set[str] = set()
+
+        try:
+            code, output, _ = self._run(["arp", "-a"])
+            if code == 0 and output:
+                for ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", output):
+                    octets = [int(part) for part in ip.split(".")]
+                    if len(octets) != 4:
+                        continue
+                    if any(part > 255 for part in octets):
+                        continue
+                    if ip.startswith("127.") or ip == "0.0.0.0" or ip == "255.255.255.255":
+                        continue
+                    candidates.add(ip)
+        except Exception:
+            pass
+
+        return sorted(candidates)
+
+    def _center_window(self, window: tk.Toplevel) -> None:
+        window.update_idletasks()
+        width = window.winfo_width()
+        height = window.winfo_height()
+        x = (window.winfo_screenwidth() // 2) - (width // 2)
+        y = (window.winfo_screenheight() // 2) - (height // 2)
+        window.geometry(f"+{x}+{y}")
+
+    def _resource_candidates(self, relative_path: str) -> list[str]:
+        candidates: list[str] = []
+
+        # Desarrollo: recursos junto al codigo de la app.
+        candidates.append(os.path.join(self.app_dir, relative_path))
+
+        # Compatibilidad hacia atras: recursos en carpeta padre (utilidades).
+        candidates.append(os.path.join(self.tools_dir, relative_path))
+
+        # Ejecutable PyInstaller onefile: recursos extraidos en _MEIPASS
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(os.path.join(meipass, relative_path))
+
+        # Ejecutable instalado junto a archivos auxiliares
+        exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else ""
+        if exe_dir:
+            candidates.append(os.path.join(exe_dir, relative_path))
+
+        # Fallback adicional: cwd
+        candidates.append(os.path.join(os.getcwd(), relative_path))
+        return candidates
+
+    def _migrate_legacy_state_files(self) -> None:
+        legacy_to_current = [
+            (os.path.join(self.tools_dir, "perfiles_shopify.ini"), self.profiles_file),
+            (os.path.join(self.tools_dir, "historial_shopify.log"), self.history_file),
+        ]
+        for legacy_path, current_path in legacy_to_current:
+            try:
+                if os.path.isfile(current_path) or not os.path.isfile(legacy_path):
+                    continue
+                os.replace(legacy_path, current_path)
+            except Exception:
+                # Si no se puede mover, mantenemos compatibilidad sin bloquear arranque.
+                pass
+
+    def _find_first_existing(self, relative_paths: list[str]) -> str:
+        for rel in relative_paths:
+            for candidate in self._resource_candidates(rel):
+                if os.path.isfile(candidate):
+                    return candidate
+        return ""
+
+    def _extract_host_port_from_docker_host(self, value: str) -> tuple[str, int] | None:
+        host = (value or "").strip()
+        if not host:
+            return None
+
+        if host.startswith("tcp://"):
+            host = host[6:]
+        elif host.startswith("http://"):
+            host = host[7:]
+        elif host.startswith("https://"):
+            host = host[8:]
+        elif host.startswith("ssh://"):
+            return None
+
+        if host.startswith("[") and "]" in host:
+            # IPv6 con corchetes: [::1]:2375
+            end = host.find("]")
+            ip6 = host[1:end]
+            rest = host[end + 1 :]
+            if rest.startswith(":") and rest[1:].isdigit():
+                return ip6, int(rest[1:])
+            return ip6, 2375
+
+        if ":" in host:
+            h, p = host.rsplit(":", 1)
+            if p.isdigit():
+                return h, int(p)
+        return host, 2375
+
+    def _diagnose_remote_docker_host(self) -> str:
+        if self.docker_mode != "remote" or not self.docker_host:
+            return ""
+
+        now = time.time()
+        if (now - self._last_remote_diag_at) < 8.0 and self._last_remote_diag_text:
+            return self._last_remote_diag_text
+
+        parsed = self._extract_host_port_from_docker_host(self.docker_host)
+        if parsed is None:
+            diag = "Host remoto en modo SSH. Verifica que Docker acepte conexiones por SSH y que las credenciales sean validas."
+            self._last_remote_diag_at = now
+            self._last_remote_diag_text = diag
+            return diag
+
+        host, port = parsed
+        try:
+            resolved = socket.gethostbyname(host)
+        except Exception:
+            diag = f"No se pudo resolver DNS del host remoto '{host}'."
+            self._last_remote_diag_at = now
+            self._last_remote_diag_text = diag
+            return diag
+
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                diag = (
+                    f"Host remoto responde por TCP ({host}:{port}, {resolved}), "
+                    "pero Docker rechazo la conexion. Revisa TLS/credenciales o que el daemon acepte API remota."
+                )
+        except Exception:
+            if port == 2375 and self._is_tcp_open(host, 2376, timeout=1.2):
+                diag = (
+                    f"El puerto 2375 no responde en {host}, pero 2376 sí esta abierto. "
+                    "Prueba conectando como tcp://HOST:2376 (normalmente requiere TLS)."
+                )
+                self._last_remote_diag_at = now
+                self._last_remote_diag_text = diag
+                return diag
+            diag = (
+                f"Host remoto resuelve ({host} -> {resolved}) pero el puerto {port} no responde. "
+                "Abre firewall y expone Docker API en ese puerto."
+            )
+
+        self._last_remote_diag_at = now
+        self._last_remote_diag_text = diag
+        return diag
+
+    def _docker_unavailable_message(self) -> str:
+        if self._docker_check_in_progress:
+            return "Comprobando conexion Docker... espera unos segundos y vuelve a intentarlo."
+
+        details: list[str] = ["Docker no esta disponible."]
+        if self.docker_mode == "remote" and self.docker_host:
+            details.append(f"Modo remoto: {self.docker_host}")
+            diag = self._diagnose_remote_docker_host()
+            if diag:
+                details.append(diag)
+        else:
+            if not self._detect_docker_cli() and docker is None:
+                details.append("No se encontro docker.exe ni el paquete Python 'docker'.")
+                details.append("Instala Docker Desktop o recompila la app incluyendo dependencia 'docker'.")
+
+        if self.last_docker_error_detail:
+            details.append(f"Error tecnico: {self.last_docker_error_detail}")
+        return "\n\n".join(details)
+
+    def _ensure_profiles_file(self) -> None:
+        if os.path.isfile(self.profiles_file):
+            return
+        with open(self.profiles_file, "w", encoding="utf-8") as fh:
+            fh.write("; Formato: nombre_perfil=contenedor1,contenedor2\n")
+            fh.write("; Ejemplo: tienda=shopify-dev1\n")
+
+    @staticmethod
+    def _build_audit_actor() -> str:
+        user = (os.environ.get("USERNAME") or os.environ.get("USER") or "desconocido").strip() or "desconocido"
+        host = (os.environ.get("COMPUTERNAME") or socket.gethostname() or "equipo-desconocido").strip() or "equipo-desconocido"
+        return f"{user}@{host}"
+
+    def _ensure_remote_history_volume(self, client: object) -> None:
+        try:
+            client.volumes.get(self.remote_history_volume)  # type: ignore[union-attr]
+        except Exception:
+            client.volumes.create(name=self.remote_history_volume)  # type: ignore[union-attr]
+
+    def _append_remote_history_line(self, line: str) -> None:
+        if self.docker_mode != "remote":
+            raise RuntimeError("El historial requiere modo remoto activo para registrar auditoria compartida.")
+
+        client = self._get_docker_sdk_client(timeout_seconds=20)
+        if client is None:
+            raise RuntimeError("No se pudo conectar con Docker remoto para escribir historial.")
+
+        self._ensure_remote_history_volume(client)
+        cmd = [
+            "sh",
+            "-c",
+            f"mkdir -p /data && touch {self.remote_history_path} && printf '%s\\n' \"$WPU_HISTORY_LINE\" >> {self.remote_history_path}",
+        ]
+        client.containers.run(
+            "alpine",
+            command=cmd,
+            remove=True,
+            labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-write"},
+            environment={"WPU_HISTORY_LINE": line},
+            volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
+        )
+
+    def _read_remote_history_lines(self) -> list[str]:
+        if self.docker_mode != "remote":
+            raise RuntimeError("Activa modo remoto para consultar historial compartido.")
+
+        client = self._get_docker_sdk_client(timeout_seconds=20)
+        if client is None:
+            raise RuntimeError("No se pudo conectar con Docker remoto para leer historial.")
+
+        self._ensure_remote_history_volume(client)
+        cmd = [
+            "sh",
+            "-c",
+            f"mkdir -p /data && touch {self.remote_history_path} && cat {self.remote_history_path}",
+        ]
+        data = client.containers.run(
+            "alpine",
+            command=cmd,
+            remove=True,
+            labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-read"},
+            volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
+        )
+        raw = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
+        return [line.rstrip("\n") for line in raw.splitlines()]
+
+    def _on_history_tab_selected(self, _event: object = None) -> None:
+        if self.tabs is None or self.history_tab_frame is None:
+            return
+        selected_id = self.tabs.select()
+        if not selected_id:
+            return
+        selected_widget = self.tabs.nametowidget(selected_id)
+        if selected_widget is self.history_tab_frame:
+            self.refresh_history()
+
+    def _is_history_tab_visible(self) -> bool:
+        if self.tabs is None or self.history_tab_frame is None:
+            return False
+        selected_id = self.tabs.select()
+        if not selected_id:
+            return False
+        return self.tabs.nametowidget(selected_id) is self.history_tab_frame
+
+    def _refresh_history_if_visible(self) -> None:
+        if self._is_history_tab_visible():
+            self.refresh_history()
+
+    def _schedule_helper_container_cleanup(self, force: bool = False) -> None:
+        now = time.time()
+        if self._helper_cleanup_in_progress:
+            return
+        if not force and (now - self._helper_cleanup_last_at) < 20.0:
+            return
+
+        self._helper_cleanup_in_progress = True
+        self._helper_cleanup_last_at = now
+
+        def worker() -> None:
+            try:
+                client = self._get_docker_sdk_client(timeout_seconds=10)
+                if client is None:
+                    return
+
+                labeled = client.containers.list(  # type: ignore[union-attr]
+                    all=True,
+                    filters={"status": "exited", "label": f"{self._helper_label_key}={self._helper_label_value}"},
+                )
+                for cont in labeled:
+                    try:
+                        cont.remove(force=True)
+                    except Exception:
+                        pass
+
+                # Cleanup de helpers antiguos sin labels (retrocompatibilidad).
+                legacy = client.containers.list(  # type: ignore[union-attr]
+                    all=True,
+                    filters={"status": "exited", "ancestor": "alpine"},
+                )
+                for cont in legacy:
+                    try:
+                        cfg = getattr(cont, "attrs", {}).get("Config", {})
+                        cmd = cfg.get("Cmd")
+                        cmd_text = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd or "")
+                        cmd_low = cmd_text.lower()
+                        if "/data" in cmd_low and (
+                            "profiles" in cmd_low
+                            or "historial" in cmd_low
+                            or "wpu_batch" in cmd_low
+                            or "wpu_history_line" in cmd_low
+                        ):
+                            cont.remove(force=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            finally:
+                self._helper_cleanup_in_progress = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_history_message(self, message: str) -> None:
+        self.history_text.configure(state="normal")
+        self.history_text.delete("1.0", tk.END)
+        self.history_text.insert("1.0", message)
+        self.history_text.configure(state="disabled")
+
+    def _history_refresh_worker(self) -> None:
+        try:
+            # Flush pending lines first (works for both local and remote)
+            with self._history_pending_lock:
+                pending = list(self._history_pending_lines)
+                self._history_pending_lines.clear()
+
+            if self.docker_mode != "remote":
+                # LOCAL MODE: write pending lines to local file and read it back
+                if pending:
+                    try:
+                        os.makedirs(os.path.dirname(self.history_file) or ".", exist_ok=True)
+                        with open(self.history_file, "a", encoding="utf-8") as fh:
+                            for line in pending:
+                                fh.write(line + "\n")
+                    except Exception:
+                        pass
+
+                lines: list[str] = []
+                try:
+                    if os.path.isfile(self.history_file):
+                        with open(self.history_file, "r", encoding="utf-8", errors="replace") as fh:
+                            lines = [ln.rstrip("\n") for ln in fh.readlines()]
+                except Exception:
+                    pass
+                self._history_refresh_queue.put((True, lines))
+                return
+
+            # REMOTE MODE: use Docker volume
+            client = self._get_docker_sdk_client(timeout_seconds=20)
+            if client is None:
+                raise RuntimeError("No se pudo conectar con Docker remoto para historial.")
+            self._ensure_remote_history_volume(client)
+
+            if pending:
+                batch = "".join(ln + "\n" for ln in pending)
+                client.containers.run(  # type: ignore[union-attr]
+                    "alpine",
+                    command=["sh", "-c", f"printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}"],
+                    remove=True,
+                    labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-batch-write"},
+                    environment={"WPU_BATCH": batch},
+                    volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
+                )
+
+            # Read the full log
+            data = client.containers.run(  # type: ignore[union-attr]
+                "alpine",
+                command=["sh", "-c", f"cat {self.remote_history_path} 2>/dev/null || true"],
+                remove=True,
+                labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-full-read"},
+                volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
+            )
+            raw = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
+            lines = [ln.rstrip("\n") for ln in raw.splitlines()]
+            self._history_refresh_queue.put((True, lines))
+        except Exception as exc:
+            self._history_refresh_queue.put((False, str(exc)))
+
+    def _poll_history_refresh_queue(self) -> None:
+        try:
+            ok, payload = self._history_refresh_queue.get_nowait()
+        except queue.Empty:
+            self._history_refresh_job_id = self.root.after(100, self._poll_history_refresh_queue)
+            return
+
+        self._history_refresh_in_progress = False
+        self._history_refresh_job_id = None
+
+        if ok:
+            self.history_lines = list(payload) if isinstance(payload, list) else []
+            self.apply_history_filter()
+        else:
+            self.history_lines = []
+            detail = str(payload)
+            if self.docker_mode == "remote":
+                self._render_history_message(
+                    "Historial remoto no disponible.\n\n"
+                    "Activa modo remoto y valida acceso al daemon Docker para auditoria compartida.\n\n"
+                    f"Detalle: {detail}"
+                )
+            else:
+                self._render_history_message(
+                    "No hay registros en el historial local todavia.\n\n"
+                    f"Detalle: {detail}"
+                )
+
+        if self._history_refresh_requested:
+            self._history_refresh_requested = False
+            self.refresh_history()
+
+    def log_event(self, accion: str, objetivo: str, estado: str, detalle: str) -> None:
+        stamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        actor = self.audit_actor
+        line = f"[{stamp}] [{estado}] {accion} | {objetivo} | usuario={actor} | {detalle}"
+        with self._history_pending_lock:
+            self._history_pending_lines.append(line)
+
+    def docker_ready(self) -> bool:
+        now = time.time()
+        stale = (now - self._docker_last_checked_at) > 6.0
+
+        if stale and not self._docker_check_in_progress:
+            self._start_async_docker_check()
+
+        return self._docker_last_ready
+
+    def _start_async_docker_check(self) -> None:
+        if self._docker_check_in_progress:
+            return
+
+        self._docker_check_in_progress = True
+        # Evita parpadeo en UI: si ya sabemos que Docker esta disponible,
+        # el re-check periodico ocurre en segundo plano sin cambiar el texto.
+        if not self._docker_last_ready:
+            self.status_var.set("Docker: comprobando...")
+
+        worker = threading.Thread(target=self._docker_ready_probe_worker, daemon=True)
+        worker.start()
+
+        if self._docker_check_job_id is None:
+            self._docker_check_job_id = self.root.after(100, self._poll_docker_check_queue)
+
+    def _docker_ready_probe_worker(self) -> None:
+        result = self._probe_docker_ready_blocking()
+        self._docker_check_queue.put(result)
+
+    def _poll_docker_check_queue(self) -> None:
+        was_ready = self._docker_last_ready
+        try:
+            ready, status_text, detail = self._docker_check_queue.get_nowait()
+        except queue.Empty:
+            self._docker_check_job_id = self.root.after(100, self._poll_docker_check_queue)
+            return
+
+        self._docker_last_ready = ready
+        self._docker_last_checked_at = time.time()
+        self._docker_check_in_progress = False
+        self._docker_check_job_id = None
+        self.last_docker_error_detail = detail
+
+        if self.status_var.get() != status_text:
+            self.status_var.set(status_text)
+        if (not ready) and detail:
+            self.log_event("DOCKER", self.docker_host or "local", "ERROR", detail)
+
+        if ready:
+            self.refresh_containers(show_errors=False, full_repaint=False)
+            if not was_ready:
+                # Al recuperar conexion, refrescamos tambien vistas dependientes de Docker.
+                self.refresh_volumes()
+                self.refresh_networks()
+                self.refresh_profiles_ui()
+        else:
+            self._stop_container_loading_spinner()
+
+    def _probe_docker_ready_blocking(self) -> tuple[bool, str, str]:
+        self.docker_cli_available = self._detect_docker_cli()
+
+        if not self.docker_cli_available:
+            code, _, err = self._run(["docker", "info"])
+            if code == 0:
+                if self.docker_mode == "remote":
+                    return True, f"Docker remoto: disponible ({self.docker_host})", ""
+                return True, "Docker local: disponible (SDK)", ""
+            detail = (err or "Sin respuesta de Docker SDK").strip()
+            if self.docker_mode == "remote":
+                diag = self._diagnose_remote_docker_host()
+                status = f"Docker remoto: no disponible ({diag})" if diag else "Docker remoto: no disponible"
+            else:
+                status = "Docker: no disponible"
+            return False, status, detail
+
+        if self.docker_mode == "remote":
+            code, _, err = self._run(["docker", "info"])
+            if code == 0:
+                return True, f"Docker remoto: disponible ({self.docker_host})", ""
+            detail = (err or "Fallo de conexion con host remoto").strip()
+            diag = self._diagnose_remote_docker_host()
+            status = f"Docker remoto: no disponible ({diag})" if diag else "Docker remoto: no disponible"
+            return False, status, detail
+
+        code, _, _ = self._run(["docker", "info"])
+        if code == 0:
+            self.docker_autostart_attempted = False
+            return True, "Docker: disponible", ""
+
+        if not self.docker_autostart_attempted:
+            self.docker_autostart_attempted = True
+            started = self._start_docker_desktop()
+            if started and self._wait_for_docker_ready(timeout_seconds=90):
+                return True, "Docker: disponible", ""
+
+        return False, "Docker: no disponible", "Docker local no responde a 'docker info'."
+
+    def _start_docker_desktop(self) -> bool:
+        candidates = [
+            os.path.join(os.environ.get("ProgramFiles", ""), "Docker", "Docker", "Docker Desktop.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Docker", "Docker", "Docker Desktop.exe"),
+            os.path.join(os.environ.get("LocalAppData", ""), "Docker", "Docker", "Docker Desktop.exe"),
+        ]
+
+        for exe_path in candidates:
+            if not exe_path or not os.path.isfile(exe_path):
+                continue
+            try:
+                subprocess.Popen([exe_path], cwd=self.tools_dir, shell=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _wait_for_docker_ready(self, timeout_seconds: int = 90) -> bool:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            code, _, _ = self._run(["docker", "info"])
+            if code == 0:
+                return True
+            time.sleep(2)
+        return False
+
+    def _start_status_spinner(self, base_text: str) -> None:
+        self._stop_status_spinner()
+        self.spinner_base_text = base_text
+        self.spinner_index = 0
+        self._animate_status_spinner()
+
+    def _animate_status_spinner(self) -> None:
+        frames = ["|", "/", "-", "\\"]
+        frame = frames[self.spinner_index % len(frames)]
+        self.status_var.set(f"{self.spinner_base_text}... {frame}")
+        self.spinner_index += 1
+        self.spinner_job_id = self.root.after(120, self._animate_status_spinner)
+
+    def _stop_status_spinner(self) -> None:
+        if self.spinner_job_id is not None:
+            self.root.after_cancel(self.spinner_job_id)
+            self.spinner_job_id = None
+
+    def _selected_tab_widget(self) -> object | None:
+        if self.tabs is None:
+            return None
+        selected_id = self.tabs.select()
+        if not selected_id:
+            return None
+        try:
+            return self.tabs.nametowidget(selected_id)
+        except Exception:
+            return None
+
+    def refresh_everything(self, auto: bool = False) -> None:
+        if auto:
+            self.refresh_containers(show_errors=False, full_repaint=False)
+            self.refresh_logs_targets()
+            self._refresh_history_if_visible()
+
+            now = time.time()
+            selected = self._selected_tab_widget()
+            if (now - self._last_auto_heavy_refresh_at) >= self._auto_heavy_refresh_interval_sec:
+                if selected is self.profiles_tab_frame:
+                    self.refresh_profiles_ui()
+                elif selected is self.networks_tab_frame:
+                    self.refresh_networks()
+                elif selected is self.volumes_tab_frame:
+                    self.refresh_volumes()
+                self._last_auto_heavy_refresh_at = now
+
+            self._schedule_auto_refresh()
+            return
+
+        self.refresh_containers(show_errors=False, full_repaint=True)
+        self.refresh_volumes()
+        self.refresh_profiles_ui()
+        self.refresh_networks()
+        self._refresh_history_if_visible()
+        self.refresh_logs_targets()
+        self._last_auto_heavy_refresh_at = time.time()
+        self._schedule_auto_refresh()
+
+    def _schedule_auto_refresh(self) -> None:
+        if self.refresh_job_id is not None:
+            self.root.after_cancel(self.refresh_job_id)
+        self.refresh_job_id = self.root.after(7000, lambda: self.refresh_everything(auto=True))
+
+    def get_all_container_names(self) -> list[str]:
+        code, out, _ = self._run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.Image}}|{{.Command}}"])
+        if code != 0 or not out:
+            self.container_image_cache = {}
+            return []
+        names: list[str] = []
+        image_cache: dict[str, str] = {}
+        for line in out.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) < 3:
+                continue
+            name = parts[0].strip()
+            image = parts[1].strip()
+            command = parts[2].strip()
+            if not name:
+                continue
+            if self._is_hidden_helper_container(name, image, command):
+                continue
+            names.append(name)
+            image_cache[name] = image
+        self.container_image_cache = image_cache
+        return names
+
+    @staticmethod
+    def _is_hidden_helper_container(name: str, image: str, command: str) -> bool:
+        _ = name
+        image_l = image.strip().lower()
+        if not image_l.startswith("alpine"):
+            return False
+
+        cmd_l = command.lower()
+        data_markers = (
+            "/data",
+            "profiles.json",
+            "historial_shopify.log",
+            "wpu_batch",
+            "wpu_history_line",
+        )
+        if any(marker in cmd_l for marker in data_markers):
+            return True
+
+        # Helper temporal para escritura de perfiles remotos
+        if "sleep 20" in cmd_l:
+            return True
+
+        return False
+
+    def _collect_profile_container_names(self) -> set[str]:
+        names: set[str] = set()
+        for profiles_map in (self.profiles_data, self.private_profiles_data, self.remote_profiles_data):
+            if not isinstance(profiles_map, dict):
+                continue
+            for containers in profiles_map.values():
+                if not isinstance(containers, list):
+                    continue
+                for item in containers:
+                    name = str(item).strip()
+                    if name:
+                        names.add(name)
+        return names
+
+    def _profiles_containing_container(self, container_name: str) -> dict[str, list[str]]:
+        container = container_name.strip()
+        if not container:
+            return {}
+
+        scopes: dict[str, dict[str, list[str]]] = {}
+
+        private_profiles = self.private_profiles_data
+        try:
+            private_profiles = self.read_private_profiles()
+            self.private_profiles_data = private_profiles
+        except Exception:
+            pass
+        scopes["privado"] = private_profiles if isinstance(private_profiles, dict) else {}
+
+        if self.docker_mode == "remote":
+            remote_profiles = self.remote_profiles_data
+            try:
+                remote_profiles = self.read_remote_profiles()
+                self.remote_profiles_data = remote_profiles
+            except Exception:
+                pass
+            scopes["remoto"] = remote_profiles if isinstance(remote_profiles, dict) else {}
+        elif isinstance(self.remote_profiles_data, dict) and self.remote_profiles_data:
+            scopes["remoto"] = self.remote_profiles_data
+
+        matches: dict[str, list[str]] = {}
+        for scope_name, profile_map in scopes.items():
+            found_profiles: list[str] = []
+            for profile_name, containers in profile_map.items():
+                if not isinstance(containers, list):
+                    continue
+                normalized = [str(item).strip() for item in containers if str(item).strip()]
+                if container in normalized:
+                    found_profiles.append(str(profile_name))
+            if found_profiles:
+                matches[scope_name] = sorted(found_profiles, key=str.lower)
+        return matches
+
+    def _remove_container_from_profile_scopes(self, container_name: str, matches: dict[str, list[str]]) -> tuple[bool, str]:
+        container = container_name.strip()
+        if not container:
+            return False, "Nombre de contenedor vacio."
+
+        for scope_name in ("privado", "remoto"):
+            profile_names = matches.get(scope_name, [])
+            if not profile_names:
+                continue
+            try:
+                profiles = self._read_profiles_for_scope(scope_name)
+            except Exception as exc:
+                return False, f"No se pudieron cargar perfiles {scope_name}: {exc}"
+
+            changed = False
+            for profile_name in profile_names:
+                current = profiles.get(profile_name, [])
+                if not isinstance(current, list):
+                    continue
+                updated = [item for item in current if str(item).strip() != container]
+                if len(updated) != len(current):
+                    profiles[profile_name] = updated
+                    changed = True
+
+            if changed:
+                try:
+                    self._write_profiles_for_scope(scope_name, profiles)
+                except Exception as exc:
+                    return False, f"No se pudieron guardar perfiles {scope_name}: {exc}"
+
+        current_scope = self._current_profiles_scope()
+        try:
+            self.profiles_data = self._read_profiles_for_scope(current_scope)
+        except Exception:
+            pass
+        return True, ""
+
+    @staticmethod
+    def _container_service_label(name: str, image: str = "") -> str | None:
+        token = f"{name} {image}".lower()
+        name_l = name.lower()
+
+        if "shopify" in token or "shopify-cli" in token:
+            return "Contenedor de Shopify"
+
+        if "node" in token and ("theme" in name_l or "shop" in name_l or "dev" in name_l):
+            return "Contenedor Shopify Node"
+
+        return None
+
+    def _container_protection_text(self, name: str, image: str = "") -> str:
+        reasons: list[str] = []
+        service_label = self._container_service_label(name, image)
+        if service_label:
+            reasons.append(service_label)
+
+        log_target = self.log_container_var.get().strip()
+        if (not service_label) and log_target and name == log_target:
+            reasons.append("Contenedor de logs")
+
+        profiled = self._collect_profile_container_names()
+        if name in profiled:
+            reasons.append("Incluido en perfiles")
+
+        if not reasons:
+            return "-"
+
+        unique_reasons = list(dict.fromkeys(reasons))
+        return f"{'; '.join(unique_reasons)}"
+
+    def _container_service_tag(self, name: str, image: str = "") -> str | None:
+        service_label = self._container_service_label(name, image)
+        if service_label in ("Contenedor de Shopify", "Contenedor Shopify Node"):
+            return "svc_shopify"
+        if service_label == "Contenedor de DB":
+            return "svc_db"
+        # No phpMyAdmin in Shopify setup
+        return None
+
+        log_target = self.log_container_var.get().strip()
+        if log_target and name == log_target:
+            return "svc_logs"
+        return None
+
+    def parse_container_rows(self, text: str) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
+        for line in text.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) < 2:
+                continue
+            name = parts[0].strip()
+            status_raw = parts[1].strip()
+            ports = parts[2].strip() if len(parts) == 3 else ""
+
+            state = "ARRANCADO" if status_raw.lower().startswith("up") else "APAGADO"
+            health = "Sin healthcheck"
+            s = status_raw.lower()
+            if "unhealthy" in s:
+                health = "\u26a0 Unhealthy"
+            elif "healthy" in s:
+                health = "\u2714 Healthy"
+            elif "starting" in s:
+                health = "\u21bb Starting"
+
+            port = self.extract_port(ports) if state == "ARRANCADO" else "-"
+            rows.append((name, state, health, port))
+        return rows
+
+    @staticmethod
+    def extract_port(ports: str) -> str:
+        if not ports:
+            return "-"
+
+        first = ports.split(",")[0].strip()
+        if "->" in first:
+            left = first.split("->", 1)[0]
+            match = re.search(r":(\d+)$", left)
+            if match:
+                return match.group(1)
+            only = re.search(r"(\d+)", left)
+            if only:
+                return only.group(1)
+
+        plain = re.search(r"(\d+)", first)
+        return plain.group(1) if plain else "-"
+
+    def refresh_containers(self, show_errors: bool = True, full_repaint: bool = True) -> None:
+        # Guardar los nombres seleccionados para restaurarlos tras el refresco.
+        previously_selected: set[str] = set()
+        for item_id in self.tree.selection():
+            vals = self.tree.item(item_id, "values")
+            if vals:
+                previously_selected.add(str(vals[0]))
+
+        if full_repaint:
+            # En refresco manual mostramos estado de carga y repintamos toda la tabla.
+            self._start_container_loading_spinner()
+            self.root.update_idletasks()
+        else:
+            # En refresco automatico no vaciamos la tabla para evitar parpadeo.
+            self._stop_container_loading_spinner()
+
+        if not self.docker_ready():
+            self.last_refresh_var.set("Ultima actualizacion: Docker no disponible")
+            if full_repaint:
+                self.container_cache = []
+                self.container_image_cache = {}
+            if self._docker_check_in_progress and full_repaint:
+                self._start_container_loading_spinner()
+            elif full_repaint:
+                self._stop_container_loading_spinner()
+            return
+
+        code, out, err = self._run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Ports}}|{{.Image}}|{{.Command}}"])
+        if code != 0:
+            self.last_refresh_var.set("Ultima actualizacion: error al listar contenedores")
+            if err and show_errors:
+                messagebox.showwarning("Docker", f"No se pudo leer contenedores.\n\n{err}")
+            if full_repaint:
+                self.container_cache = []
+                self.container_image_cache = {}
+                self._stop_container_loading_spinner()
+            return
+
+        rows: list[tuple[str, str, str, str, str]] = []
+        for line in out.splitlines():
+            parts = line.split("|", 4)
+            if len(parts) < 5:
+                continue
+            name = parts[0].strip()
+            status_raw = parts[1].strip()
+            ports = parts[2].strip()
+            image = parts[3].strip()
+            command = parts[4].strip()
+            if self._is_hidden_helper_container(name, image, command):
+                continue
+
+            state = "ARRANCADO" if status_raw.lower().startswith("up") else "APAGADO"
+            health = "Sin healthcheck"
+            s = status_raw.lower()
+            if "unhealthy" in s:
+                health = "\u26a0 Unhealthy"
+            elif "healthy" in s:
+                health = "\u2714 Healthy"
+            elif "starting" in s:
+                health = "\u21bb Starting"
+
+            port = self.extract_port(ports) if state == "ARRANCADO" else "-"
+            rows.append((name, state, health, port, image))
+
+        self.container_cache = [row[0] for row in rows]
+        self.container_image_cache = {row[0]: row[4] for row in rows}
+        self._stop_container_loading_spinner()
+
+        display_rows: list[tuple[str, tuple[str, str, str, str, str], tuple[str, ...]]] = []
+        for row in rows:
+            state_val = row[1]
+            health_val = row[2]
+            if state_val == "ARRANCADO":
+                tag = "unhealthy" if "Unhealthy" in health_val else "running"
+            else:
+                tag = "stopped"
+            protection = self._container_protection_text(row[0], row[4])
+            tags: list[str] = [tag]
+            service_tag = self._container_service_tag(row[0], row[4])
+            if service_tag:
+                tags.append(service_tag)
+            display_rows.append((row[0], (row[0], row[1], row[2], row[3], protection), tuple(tags)))
+
+        if full_repaint:
+            for item_id in self.tree.get_children():
+                self.tree.delete(item_id)
+
+            if not display_rows:
+                self.tree.insert("", "end", values=("(sin contenedores)", "-", "-", "-", "-"))
+            else:
+                for name, values, tags in display_rows:
+                    iid = self.tree.insert("", "end", values=values, tags=tags)
+                    if name in previously_selected:
+                        self.tree.selection_add(iid)
+            self.last_refresh_var.set("Ultima actualizacion: correcta")
+            return
+
+        # Refresco automatico: actualizar filas en sitio para evitar desaparecer/reaparecer.
+        placeholder_ids: list[str] = []
+        existing_by_name: dict[str, str] = {}
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, "values")
+            if not values:
+                continue
+            current_name = str(values[0]).strip()
+            if current_name == "(sin contenedores)":
+                placeholder_ids.append(item_id)
+                continue
+            if current_name:
+                existing_by_name[current_name] = item_id
+
+        desired_names = {name for name, _values, _tags in display_rows}
+
+        for old_name, old_item_id in list(existing_by_name.items()):
+            if old_name not in desired_names:
+                self.tree.delete(old_item_id)
+                existing_by_name.pop(old_name, None)
+
+        if not display_rows:
+            for item_id in self.tree.get_children():
+                self.tree.delete(item_id)
+            self.tree.insert("", "end", values=("(sin contenedores)", "-", "-", "-", "-"))
+            self.last_refresh_var.set("Ultima actualizacion: correcta")
+            return
+
+        for item_id in placeholder_ids:
+            if self.tree.exists(item_id):
+                self.tree.delete(item_id)
+
+        for index, (name, values, tags) in enumerate(display_rows):
+            item_id = existing_by_name.get(name)
+            if item_id and self.tree.exists(item_id):
+                self.tree.item(item_id, values=values, tags=tags)
+            else:
+                item_id = self.tree.insert("", "end", values=values, tags=tags)
+                existing_by_name[name] = item_id
+            self.tree.move(item_id, "", index)
+            if name in previously_selected:
+                self.tree.selection_add(item_id)
+
+        self.last_refresh_var.set("Ultima actualizacion: correcta")
+
+    def selected_containers(self) -> list[str]:
+        selection = self.tree.selection()
+        if not selection:
+            return []
+
+        names: list[str] = []
+        for item_id in selection:
+            values = self.tree.item(item_id, "values")
+            if not values:
+                continue
+            name = str(values[0])
+            if name and name != "(sin contenedores)" and name not in names:
+                names.append(name)
+        return names
+
+    def run_docker_action(
+        self,
+        args: list[str],
+        success_msg: str,
+        target_names: list[str] | None = None,
+    ) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        # Localizar filas del Treeview que se van a ver afectadas
+        spinner_items: list[str] = []
+        if target_names:
+            name_set = set(target_names)
+            for iid in self.tree.get_children():
+                vals = self.tree.item(iid, "values")
+                if vals and str(vals[0]) in name_set:
+                    spinner_items.append(iid)
+
+        self._set_container_action_btns_state("disabled")
+        self._start_container_spinner(spinner_items)
+
+        result_q: queue.Queue[tuple[str, str]] = queue.Queue()
+
+        def worker() -> None:
+            objetivo = " ".join(args[2:]) if len(args) > 2 else "global"
+            code, _, err = self._run(args)
+            if code == 0:
+                result_q.put(("ok", objetivo))
+            else:
+                result_q.put(("error", err or "Operacion fallida"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll() -> None:
+            try:
+                kind, payload = result_q.get_nowait()
+            except queue.Empty:
+                self.root.after(200, poll)
+                return
+
+            self._stop_container_spinner()
+            self._set_container_action_btns_state("normal")
+
+            if kind == "ok":
+                self.log_event("DOCKER", payload, "OK", " ".join(args))
+                self.refresh_everything()
+                messagebox.showinfo("Docker", success_msg)
+            else:
+                self.log_event("DOCKER", "global", "ERROR", payload)
+                self.refresh_everything()
+                messagebox.showerror("Docker", payload)
+
+        self.root.after(200, poll)
+
+    def _set_container_action_btns_state(self, state: str) -> None:
+        for btn in self.container_action_btns:
+            try:
+                btn.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _start_container_spinner(self, item_ids: list[str]) -> None:
+        self._stop_container_spinner()
+        self._container_spinner_items = item_ids
+        self._container_spinner_frame = 0
+        if item_ids:
+            self._animate_container_spinner()
+
+    def _animate_container_spinner(self) -> None:
+        frames = ["\u29d7", "\u29d6", "\u29d5", "\u29d4"]
+        text = frames[self._container_spinner_frame % len(frames)] + " Procesando"
+        for iid in self._container_spinner_items:
+            try:
+                self.tree.set(iid, "state", text)
+            except tk.TclError:
+                pass
+        self._container_spinner_frame += 1
+        self._container_spinner_job = self.root.after(250, self._animate_container_spinner)
+
+    def _stop_container_spinner(self) -> None:
+        if self._container_spinner_job is not None:
+            self.root.after_cancel(self._container_spinner_job)
+            self._container_spinner_job = None
+        self._container_spinner_items = []
+
+    def _start_container_loading_spinner(self) -> None:
+        if not hasattr(self, "tree"):
+            return
+        if self._container_loading_job is not None:
+            return
+
+        self._container_loading_frame = 0
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.tree.insert("", "end", iid="__loading__", values=("Cargando contenedores...", "-", "-", "-", "-"))
+        self._animate_container_loading_spinner()
+
+    def _animate_container_loading_spinner(self) -> None:
+        if not hasattr(self, "tree"):
+            return
+
+        frames = ["|", "/", "-", "\\"]
+        frame = frames[self._container_loading_frame % len(frames)]
+        if self.tree.exists("__loading__"):
+            self.tree.item("__loading__", values=(f"Cargando contenedores... {frame}", "-", "-", "-", "-"))
+        self._container_loading_frame += 1
+        self._container_loading_job = self.root.after(140, self._animate_container_loading_spinner)
+
+    def _stop_container_loading_spinner(self) -> None:
+        if self._container_loading_job is not None:
+            self.root.after_cancel(self._container_loading_job)
+            self._container_loading_job = None
+        if hasattr(self, "tree") and self.tree.exists("__loading__"):
+            self.tree.delete("__loading__")
+
+    # ── Profile spinner helpers ────────────────────────────────────────────
+
+    def _start_profile_spinner(self, profile_name: str) -> None:
+        self._stop_profile_spinner()
+        self._profile_spinner_name = profile_name
+        self._profile_spinner_frame2 = 0
+        self._animate_profile_spinner()
+
+    def _animate_profile_spinner(self) -> None:
+        frames = ["⧗", "⧖", "⧕", "⧔"]
+        text = frames[self._profile_spinner_frame2 % len(frames)] + " Procesando..."
+        for i in range(self.profiles_listbox.size()):
+            entry = self.profiles_listbox.get(i)
+            if entry == self._profile_spinner_name or entry.endswith(" Procesando..."):
+                self.profiles_listbox.delete(i)
+                self.profiles_listbox.insert(i, text)
+                self.profiles_listbox.itemconfig(i, fg="#f59e0b")
+                self.profiles_listbox.selection_set(i)
+                break
+        self._profile_spinner_frame2 += 1
+        self._profile_spinner_job = self.root.after(250, self._animate_profile_spinner)
+
+    def _stop_profile_spinner(self) -> None:
+        if self._profile_spinner_job is not None:
+            self.root.after_cancel(self._profile_spinner_job)
+            self._profile_spinner_job = None
+
+    def start_selected(self) -> None:
+        names = self.selected_containers()
+        if not names:
+            messagebox.showwarning("Seleccion", "Selecciona al menos un contenedor.")
+            return
+        self.run_docker_action(["docker", "start"] + names, f"Contenedores arrancados: {', '.join(names)}", target_names=names)
+
+    def stop_selected(self) -> None:
+        names = self.selected_containers()
+        if not names:
+            messagebox.showwarning("Seleccion", "Selecciona al menos un contenedor.")
+            return
+        self.run_docker_action(["docker", "stop"] + names, f"Contenedores apagados: {', '.join(names)}", target_names=names)
+
+    def remote_access_selected(self) -> None:
+        names = self.selected_containers()
+        if not names:
+            messagebox.showwarning("Seleccion", "Selecciona un contenedor.")
+            return
+        if len(names) > 1:
+            messagebox.showwarning("Seleccion", "Selecciona solo un contenedor para el acceso remoto.")
+            return
+        self.abrir_vscode_en_contenedor(names[0])
+
+    def start_all(self) -> None:
+        code, out, _ = self._run(["docker", "ps", "-aq"])
+        if code != 0 or not out:
+            messagebox.showwarning("Docker", "No hay contenedores para arrancar.")
+            return
+        self.run_docker_action(["docker", "start"] + out.splitlines(), "Contenedores arrancados.", target_names=self.container_cache[:])
+
+    def stop_all(self) -> None:
+        code, out, _ = self._run(["docker", "ps", "-q"])
+        if code != 0 or not out:
+            messagebox.showwarning("Docker", "No hay contenedores en ejecucion para apagar.")
+            return
+        self.run_docker_action(["docker", "stop"] + out.splitlines(), "Contenedores apagados.", target_names=self.container_cache[:])
+
+    def _read_legacy_ini_profiles(self) -> dict[str, list[str]]:
+        self._ensure_profiles_file()
+        profiles: dict[str, list[str]] = {}
+        with open(self.profiles_file, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith(";") or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                name = key.strip()
+                containers = [item.strip() for item in value.split(",") if item.strip()]
+                if name:
+                    profiles[name] = containers
+        return profiles
+
+    def _default_profiles_payload(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "updated_at": "",
+            "updated_by": "",
+            "profiles": {},
+        }
+
+    def _sanitize_profiles_mapping(self, data: object) -> dict[str, list[str]]:
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, list[str]] = {}
+        for key, value in data.items():
+            name = str(key).strip()
+            if not name:
+                continue
+            if isinstance(value, list):
+                containers = [str(item).strip() for item in value if str(item).strip()]
+            else:
+                containers = []
+            result[name] = containers
+        return result
+
+    def _ensure_private_profiles_file(self) -> None:
+        os.makedirs(self.private_profiles_dir, exist_ok=True)
+        if os.path.isfile(self.private_profiles_file):
+            return
+
+        payload = self._default_profiles_payload()
+        legacy = self._read_legacy_ini_profiles()
+        if legacy:
+            payload["profiles"] = legacy
+        with open(self.private_profiles_file, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=True, indent=2)
+
+    def read_private_profiles(self) -> dict[str, list[str]]:
+        self._ensure_private_profiles_file()
+        try:
+            with open(self.private_profiles_file, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            payload = self._default_profiles_payload()
+        return self._sanitize_profiles_mapping(payload.get("profiles", {}))
+
+    def write_private_profiles(self, profiles: dict[str, list[str]]) -> None:
+        self._ensure_private_profiles_file()
+        payload = self._default_profiles_payload()
+        payload["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload["updated_by"] = os.environ.get("COMPUTERNAME", "desconocido")
+        payload["profiles"] = dict(sorted(profiles.items(), key=lambda item: item[0].lower()))
+        with open(self.private_profiles_file, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=True, indent=2)
+
+    def _ensure_remote_profiles_volume(self, client: object | None = None) -> None:
+        if client is None:
+            client = self._get_docker_sdk_client(timeout_seconds=20)
+        if client is None:
+            raise RuntimeError("No se pudo conectar con Docker para perfiles remotos.")
+        try:
+            client.volumes.get(self.remote_profiles_volume)
+        except Exception:
+            client.volumes.create(name=self.remote_profiles_volume)
+
+    def read_remote_profiles(self) -> dict[str, list[str]]:
+        if self.docker_mode != "remote":
+            return {}
+
+        # Ruta de lectura alineada con el comando CLI validado en terminal.
+        # Esto evita discrepancias entre SDK y docker CLI en algunos daemons remotos.
+        code_v, _out_v, err_v = self._run(["docker", "volume", "create", self.remote_profiles_volume])
+        if code_v != 0:
+            raise RuntimeError(err_v or "No se pudo asegurar el volumen remoto de perfiles.")
+
+        default_payload = json.dumps(self._default_profiles_payload(), ensure_ascii=True)
+        script = (
+            "mkdir -p /data; "
+            f"if [ ! -f {self.remote_profiles_path} ]; then "
+            "printf '%s' \"$WPU_DEFAULT\" > "
+            f"{self.remote_profiles_path}; "
+            "fi; "
+            f"cat {self.remote_profiles_path}"
+        )
+        code, out, err = self._run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-e",
+                f"WPU_DEFAULT={default_payload}",
+                "-v",
+                f"{self.remote_profiles_volume}:/data",
+                "alpine",
+                "sh",
+                "-c",
+                script,
+            ]
+        )
+        if code != 0:
+            raise RuntimeError(err or "No se pudo leer profiles.json remoto.")
+
+        raw = out.strip()
+        if not raw:
+            raw = default_payload
+        raw = raw.lstrip("\ufeff")
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            # Si el JSON remoto esta dañado, se reconstruye la estructura minima
+            # para que la UI vuelva a cargar y se pueda guardar de nuevo.
+            payload = self._default_profiles_payload()
+            try:
+                self.write_remote_profiles(self._sanitize_profiles_mapping(payload.get("profiles", {})))
+            except Exception:
+                pass
+        return self._sanitize_profiles_mapping(payload.get("profiles", {}))
+
+    def write_remote_profiles(self, profiles: dict[str, list[str]]) -> None:
+        if self.docker_mode != "remote":
+            raise RuntimeError("Los perfiles remotos solo estan disponibles en modo remoto.")
+
+        client = self._get_docker_sdk_client(timeout_seconds=20)
+        if client is None:
+            raise RuntimeError("No se pudo conectar con Docker remoto.")
+
+        self._ensure_remote_profiles_volume(client)
+
+        payload = self._default_profiles_payload()
+        payload["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload["updated_by"] = os.environ.get("COMPUTERNAME", "desconocido")
+        payload["profiles"] = dict(sorted(profiles.items(), key=lambda item: item[0].lower()))
+        raw = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
+
+        helper = client.containers.create(
+            "alpine",
+            command=["sh", "-c", "sleep 20"],
+            labels={self._helper_label_key: self._helper_label_value, "wpu.role": "profiles-write"},
+            volumes={self.remote_profiles_volume: {"bind": "/data", "mode": "rw"}},
+        )
+        try:
+            helper.start()
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w") as tar:
+                info = tarfile.TarInfo(name="profiles.json")
+                info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+            buf.seek(0)
+            ok = helper.put_archive("/data", buf.read())
+            if not ok:
+                raise RuntimeError("No se pudo guardar profiles.json en el volumen remoto.")
+        finally:
+            try:
+                helper.remove(force=True)
+            except Exception:
+                pass
+
+    def _current_profiles_scope(self) -> str:
+        return self.profile_scope_var.get().strip().lower() or "privado"
+
+    def _current_profiles_label(self) -> str:
+        return "Perfiles remotos" if self._current_profiles_scope() == "remoto" else "Perfiles privados"
+
+    def _target_profiles_scope(self) -> str:
+        return "privado" if self._current_profiles_scope() == "remoto" else "remoto"
+
+    def _target_profiles_label(self) -> str:
+        return "privado" if self._target_profiles_scope() == "privado" else "remoto"
+
+    def _profile_container_display_name(self, container_name: str, in_selected_profile: bool) -> str:
+        if in_selected_profile:
+            return f"{container_name} (En el perfil seleccionado)"
+        return container_name
+
+    def _profile_container_actual_name(self, displayed_name: str) -> str:
+        suffix = " (En el perfil seleccionado)"
+        if displayed_name.endswith(suffix):
+            return displayed_name[:-len(suffix)]
+        return displayed_name
+
+    def _render_profile_containers(self, selected_profile_name: str | None = None) -> None:
+        selected_containers = set(self.profiles_data.get(selected_profile_name, [])) if selected_profile_name else set()
+        self.profile_containers_listbox.delete(0, tk.END)
+        for cname in self.container_cache:
+            image_ref = self.container_image_cache.get(cname, "").strip().lower()
+            if image_ref.startswith("alpine"):
+                continue
+            self.profile_containers_listbox.insert(
+                tk.END,
+                self._profile_container_display_name(cname, cname in selected_containers),
+            )
+
+        self.profile_containers_listbox.selection_clear(0, tk.END)
+        if not selected_profile_name:
+            return
+
+        for idx in range(self.profile_containers_listbox.size()):
+            item = self._profile_container_actual_name(self.profile_containers_listbox.get(idx))
+            if item in selected_containers:
+                self.profile_containers_listbox.selection_set(idx)
+
+    def _read_profiles_for_scope(self, scope: str) -> dict[str, list[str]]:
+        if scope == "remoto":
+            self.remote_profiles_data = self.read_remote_profiles()
+            return self.remote_profiles_data
+        self.private_profiles_data = self.read_private_profiles()
+        return self.private_profiles_data
+
+    def _write_profiles_for_scope(self, scope: str, profiles: dict[str, list[str]]) -> None:
+        if scope == "remoto":
+            self.remote_profiles_data = profiles
+            self.write_remote_profiles(profiles)
+            return
+        self.private_profiles_data = profiles
+        self.write_private_profiles(profiles)
+
+    def _select_profile_in_ui(self, profile_name: str) -> None:
+        for idx in range(self.profiles_listbox.size()):
+            if self.profiles_listbox.get(idx) == profile_name:
+                self.profiles_listbox.selection_clear(0, tk.END)
+                self.profiles_listbox.selection_set(idx)
+                self.profiles_listbox.see(idx)
+                self.profile_name_var.set(profile_name)
+                self._render_profile_containers(profile_name)
+                return
+
+    def _load_profiles_for_current_scope(self) -> dict[str, list[str]]:
+        return self._read_profiles_for_scope(self._current_profiles_scope())
+
+    def _write_profiles_for_current_scope(self, profiles: dict[str, list[str]]) -> None:
+        self._write_profiles_for_scope(self._current_profiles_scope(), profiles)
+
+    def _set_profiles_loading_ui(self, loading: bool) -> None:
+        # Si existen los widgets, cambia el estado visual de carga
+        if hasattr(self, 'profiles_loading_label') and self.profiles_loading_label:
+            self.profiles_loading_label.configure(text="Cargando perfiles..." if loading else "")
+        if hasattr(self, 'profiles_spinner') and self.profiles_spinner:
+            self.profiles_spinner.configure(state="normal" if loading else "disabled")
+        if hasattr(self, 'profiles_listbox') and self.profiles_listbox:
+            self.profiles_listbox.configure(state="disabled" if loading else "normal")
+
+    def on_profile_scope_changed(self, _event: object | None = None) -> None:
+        self.clear_profile_editor()
+        self.refresh_profiles_ui(force=True)
+
+    def _remote_access_impl(self, container: str) -> None:
+        self.abrir_vscode_en_contenedor(container)
+
+    @staticmethod
+    def _resolver_comando(nombre: str) -> str:
+        # Si el comando es 'docker', primero intenta usar el docker.exe local incluido
+        if nombre == "docker":
+            try:
+                from docker_bin.docker_path_helper import get_docker_exe
+                ruta = get_docker_exe()
+                if ruta and os.path.exists(ruta):
+                    return ruta
+            except Exception:
+                pass
+        """Devuelve la ruta absoluta del comando buscando en el PATH y en rutas típicas de Windows."""
+        import shutil
+        ruta = shutil.which(nombre)
+        if ruta:
+            return ruta
+
+        rutas_extra = {
+            "docker": [
+                r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+                r"C:\ProgramData\DockerDesktop\version-bin\docker.exe",
+            ],
+            "ssh": [
+                r"C:\Windows\System32\OpenSSH\ssh.exe",
+                r"C:\Program Files\Git\usr\bin\ssh.exe",
+            ],
+            "ssh-keygen": [
+                r"C:\Windows\System32\OpenSSH\ssh-keygen.exe",
+                r"C:\Program Files\Git\usr\bin\ssh-keygen.exe",
+            ],
+            "code": [
+                r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
+                r"C:\Users\{}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd".format(
+                    __import__("os").environ.get("USERNAME", "")
+                ),
+            ],
+        }
+
+        for ruta_posible in rutas_extra.get(nombre, []):
+            if __import__("os").path.exists(ruta_posible):
+                return ruta_posible
+
+        raise FileNotFoundError(
+            f"No se encontró el comando '{nombre}' en el sistema.\n\n"
+            f"Asegúrate de que está instalado y su carpeta está en el PATH de Windows.\n"
+            f"Si acabas de instalarlo, reinicia la aplicación."
+        )
+
+    def abrir_vscode_en_contenedor(self, container_name: str) -> None:
+        """
+        Configura completamente el entorno SSH en el contenedor y abre VS Code via Remote-SSH:
+          1. Genera/reutiliza la clave SSH local del cliente Windows
+          2. Instala openssh-server en el contenedor si no está presente
+          3. Arranca sshd dentro del contenedor
+          4. Inyecta la clave pública en authorized_keys del contenedor
+          5. Detecta el puerto SSH accesible (port mapping o IP del contenedor)
+          6. Escribe la entrada en ~/.ssh/config para que VSCode sepa conectarse
+          7. Abre VS Code con la extensión Remote-SSH apuntando al tema en /app
+        Compatible con Docker Local, Docker Remoto SSH y Docker Remoto TCP.
+        """
+        import os as _os
+        import textwrap as _textwrap
+
+        # ── 0. Modo de conexión ───────────────────────────────────────────────
+        is_remote = self.docker_mode == "remote" and bool(self.docker_host)
+        ssh_target = None   # "user@host" para modo SSH remoto
+        use_tcp = False
+
+        if is_remote:
+            host = self.docker_host.strip()
+            if host.startswith("ssh://"):
+                ssh_target = host[6:]
+            elif host.startswith("tcp://") or host.startswith("http"):
+                use_tcp = True
+            else:
+                ssh_target = host
+
+        # Entorno con rutas típicas de Windows
+        env = _os.environ.copy()
+        extra_paths = [
+            r"C:\Program Files\Docker\Docker\resources\bin",
+            r"C:\ProgramData\DockerDesktop\version-bin",
+            r"C:\Windows\System32\OpenSSH",
+            r"C:\Program Files\Git\usr\bin",
+            r"C:\Program Files\Microsoft VS Code\bin",
+        ]
+        env["PATH"] = _os.pathsep.join(extra_paths) + _os.pathsep + env.get("PATH", "")
+        if use_tcp:
+            env["DOCKER_HOST"] = self.docker_host.strip()
+
+        # Helper para ejecutar comandos dentro del contenedor vía docker exec o ssh+docker
+        def _exec_in_container(sh_cmd: str, check: bool = False) -> subprocess.CompletedProcess:
+            if ssh_target:
+                ssh_exe = self._resolver_comando("ssh")
+                cmd = [
+                    ssh_exe, "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                    ssh_target,
+                    f"docker exec -u root {container_name} sh -c {sh_cmd!r}",
+                ]
+            else:
+                docker_exe = self._resolver_comando("docker")
+                cmd = [docker_exe, "exec", "-u", "root", container_name, "sh", "-c", sh_cmd]
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  creationflags=0x08000000, env=env)
+
+        try:
+            # ── 1. Clave SSH local (cliente Windows) ────────────────────────
+            ssh_dir = _os.path.expanduser("~/.ssh")
+            _os.makedirs(ssh_dir, exist_ok=True)
+
+            id_ed25519_pub = _os.path.join(ssh_dir, "id_ed25519.pub")
+            id_rsa_pub     = _os.path.join(ssh_dir, "id_rsa.pub")
+
+            pub_key_path = None
+            if _os.path.exists(id_ed25519_pub):
+                pub_key_path = id_ed25519_pub
+            elif _os.path.exists(id_rsa_pub):
+                pub_key_path = id_rsa_pub
+            else:
+                self.log_event("SSH", container_name, "INFO", "Generando par de claves SSH locales (ed25519)...")
+                priv_key_path = _os.path.join(ssh_dir, "id_ed25519")
+                if _os.path.exists(priv_key_path):
+                    try:
+                        _os.remove(priv_key_path)
+                    except Exception as ex:
+                        self.log_event("SSH", container_name, "WARNING", f"No se pudo borrar clave huérfana: {ex}")
+                try:
+                    ssh_keygen_exe = self._resolver_comando("ssh-keygen")
+                    r = subprocess.run(
+                        [ssh_keygen_exe, "-t", "ed25519", "-f", priv_key_path, "-N", ""],
+                        capture_output=True, text=True, creationflags=0x08000000, env=env,
+                    )
+                    if r.returncode != 0:
+                        raise Exception(f"ssh-keygen falló:\n{r.stderr}")
+                except FileNotFoundError:
+                    messagebox.showwarning(
+                        "Requisito faltante: OpenSSH",
+                        "Tu equipo no tiene instalado el 'Cliente OpenSSH' de Windows.\n\n"
+                        "Para instalarlo:\n"
+                        "1. Abre 'Configuración' de Windows.\n"
+                        "2. Ve a 'Aplicaciones' → 'Características opcionales'.\n"
+                        "3. Agrega 'Cliente OpenSSH'.\n\n"
+                        "Una vez instalado, reinicia la aplicación.",
+                    )
+                    self.log_event("SSH", container_name, "WARNING", "Falta Cliente OpenSSH en Windows.")
+                    return
+                pub_key_path = f"{priv_key_path}.pub"
+
+            with open(pub_key_path, "r", encoding="utf-8") as fh:
+                pub_key = fh.read().strip()
+            if not pub_key:
+                raise Exception(f"El archivo de clave pública '{pub_key_path}' está vacío.")
+
+            # ── 2. Instalar openssh-server en el contenedor si no existe ───
+            self.log_event("SSH", container_name, "INFO", "Verificando openssh-server en el contenedor...")
+            check_sshd = _exec_in_container("which sshd 2>/dev/null || command -v sshd 2>/dev/null")
+            if not check_sshd.stdout.strip():
+                self.log_event("SSH", container_name, "INFO", "Instalando openssh-server (puede tardar unos segundos)...")
+                install_script = (
+                    "if command -v apt-get >/dev/null 2>&1; then "
+                    "  apt-get update -qq && apt-get install -y -qq openssh-server 2>&1; "
+                    "elif command -v apk >/dev/null 2>&1; then "
+                    "  apk add --no-cache openssh 2>&1; "
+                    "elif command -v yum >/dev/null 2>&1; then "
+                    "  yum install -y -q openssh-server 2>&1; "
+                    "else "
+                    "  echo 'ERROR: gestor de paquetes no reconocido' >&2; exit 1; "
+                    "fi"
+                )
+                r_install = _exec_in_container(install_script)
+                if r_install.returncode != 0:
+                    raise Exception(
+                        f"No se pudo instalar openssh-server en el contenedor.\n\n"
+                        f"Salida:\n{r_install.stdout}\n{r_install.stderr}"
+                    )
+                self.log_event("SSH", container_name, "INFO", "openssh-server instalado correctamente.")
+
+            # ── 3. Preparar y arrancar sshd ──────────────────────────────
+            self.log_event("SSH", container_name, "INFO", "Configurando y arrancando sshd...")
+            sshd_setup = (
+                # Generar claves del host si no existen
+                "mkdir -p /run/sshd && "
+                "[ -f /etc/ssh/ssh_host_rsa_key ] || ssh-keygen -A -q 2>/dev/null; "
+                # Activar login como root con clave pública
+                "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                "sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config 2>/dev/null; "
+                # Arrancar sshd si no está corriendo
+                "if ! pgrep -x sshd >/dev/null 2>&1; then "
+                "  /usr/sbin/sshd 2>/dev/null || /usr/bin/sshd 2>/dev/null || sshd; "
+                "fi"
+            )
+            r_sshd = _exec_in_container(sshd_setup)
+            if r_sshd.returncode != 0:
+                raise Exception(
+                    f"No se pudo arrancar sshd en el contenedor.\n\n"
+                    f"Salida:\n{r_sshd.stdout}\n{r_sshd.stderr}"
+                )
+            self.log_event("SSH", container_name, "INFO", "sshd corriendo en el contenedor.")
+
+            # ── 4. Inyectar la clave pública en authorized_keys ──────────
+            self.log_event("SSH", container_name, "INFO", "Inyectando clave pública en el contenedor...")
+            partes_clave = pub_key.split()
+            key_body = partes_clave[1] if len(partes_clave) >= 2 else pub_key
+            inject_sh = (
+                f"mkdir -p /root/.ssh && "
+                f"chmod 700 /root/.ssh && "
+                f"grep -qF '{key_body}' /root/.ssh/authorized_keys 2>/dev/null "
+                f"  || printf '%s\\n' '{pub_key}' >> /root/.ssh/authorized_keys && "
+                f"chmod 600 /root/.ssh/authorized_keys"
+            )
+            r_inject = _exec_in_container(inject_sh)
+            if r_inject.returncode != 0:
+                raise Exception(
+                    f"Error inyectando la clave SSH:\n{r_inject.stderr}"
+                )
+
+            # ── 5. Descubrir host y puerto SSH accesibles desde Windows ──
+            #   Prioridad: port mapping en localhost  → IP directa del contenedor:22
+            self.log_event("SSH", container_name, "INFO", "Detectando puerto SSH del contenedor...")
+
+            ssh_host = "localhost"
+            ssh_port = 22
+
+            if ssh_target:
+                # En modo SSH remoto, host es el servidor remoto.
+                # El puerto SSH al contenedor debe estar mapeado en el servidor.
+                remote_host = ssh_target.split("@")[-1]
+                ssh_host = remote_host
+                # Intentar obtener el port mapping en el servidor remoto
+                ssh_exe = self._resolver_comando("ssh")
+                r_port = subprocess.run(
+                    [ssh_exe, "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+                     ssh_target, f"docker port {container_name} 22 2>/dev/null"],
+                    capture_output=True, text=True, creationflags=0x08000000, env=env,
+                )
+                port_out = r_port.stdout.strip()
+                if port_out:
+                    # Formato "0.0.0.0:PUERTO" o ":::PUERTO"
+                    ssh_port = int(port_out.split(":")[-1])
+                else:
+                    # Sin mapping → usar IP del contenedor en el servidor remoto
+                    r_ip = subprocess.run(
+                        [ssh_exe, "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+                         ssh_target,
+                         f"docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{.IPAddress}}}}{{{{end}}}}' {container_name} 2>/dev/null"],
+                        capture_output=True, text=True, creationflags=0x08000000, env=env,
+                    )
+                    container_ip = r_ip.stdout.strip()
+                    if container_ip:
+                        ssh_host = container_ip
+                        ssh_port = 22
+                    else:
+                        raise Exception(
+                            f"No se pudo determinar cómo acceder al contenedor '{container_name}' por SSH.\n\n"
+                            f"Asegúrate de que el contenedor expone el puerto 22 con -p <puerto>:22 "
+                            f"o que la red Docker es accesible desde el servidor remoto."
+                        )
+            else:
+                # Modo local o TCP
+                docker_exe = self._resolver_comando("docker")
+                r_port = subprocess.run(
+                    [docker_exe, "port", container_name, "22"],
+                    capture_output=True, text=True, creationflags=0x08000000, env=env,
+                )
+                port_out = r_port.stdout.strip()
+                if port_out:
+                    # Hay mapping
+                    if use_tcp:
+                        parsed = urllib.parse.urlparse(self.docker_host)
+                        ssh_host = parsed.hostname if parsed.hostname else self.docker_host.split("://")[-1].split(":")[0]
+                    else:
+                        ssh_host = "localhost"
+                    ssh_port = int(port_out.split(":")[-1])
+                else:
+                    # Sin mapping → usar IP directa del contenedor
+                    r_ip = subprocess.run(
+                        [docker_exe, "inspect", "-f",
+                         "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                         container_name],
+                        capture_output=True, text=True, creationflags=0x08000000, env=env,
+                    )
+                    container_ip = r_ip.stdout.strip()
+                    if container_ip:
+                        ssh_host = container_ip
+                        ssh_port = 22
+                    else:
+                        raise Exception(
+                            f"No se pudo obtener la IP del contenedor '{container_name}'.\n\n"
+                            f"Verifica que el contenedor está en ejecución."
+                        )
+
+            self.log_event("SSH", container_name, "INFO",
+                           f"SSH accesible en {ssh_host}:{ssh_port}")
+
+            # ── 6. Escribir entrada en ~/.ssh/config ────────────────────
+            self.log_event("SSH", container_name, "INFO", "Verificando ~/.ssh/config...")
+            ssh_config_path = _os.path.join(ssh_dir, "config")
+
+            existing = ""
+            if _os.path.exists(ssh_config_path):
+                with open(ssh_config_path, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+
+            import re as _re
+            pattern = _re.compile(
+                rf"^Host\s+{_re.escape(container_name)}\s*\n"
+                rf"(?:[ \t]+.*\n)*",
+                _re.MULTILINE,
+            )
+            has_existing = bool(pattern.search(existing))
+
+            def _get_config_block(h, p):
+                return _textwrap.dedent(f"""\
+                    Host {container_name}
+                        HostName {h}
+                        Port {p}
+                        User root
+                        StrictHostKeyChecking no
+                        UserKnownHostsFile /dev/null
+                        IdentityFile {_os.path.join(ssh_dir, "id_ed25519").replace(chr(92), "/")}
+                """)
+
+            if has_existing:
+                overwrite_result = [None]
+
+                dlg = tk.Toplevel(self.root)
+                dlg.title("Sobreescribir configuración SSH")
+                dlg.geometry("500x260")
+                dlg.resizable(False, False)
+                dlg.grab_set()
+
+                dlg.update_idletasks()
+                x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
+                y = self.root.winfo_y() + (self.root.winfo_height() - 260) // 2
+                dlg.geometry(f"+{x}+{y}")
+
+                tk.Label(dlg, text="El dominio SSH para este contenedor ya existe en tu configuración.\n¿Deseas sobreescribirlo? Puedes modificar los valores a continuación:", justify="center", wraplength=460, font=("Segoe UI", 10)).pack(pady=15)
+
+                f_inputs = tk.Frame(dlg)
+                f_inputs.pack(pady=5)
+
+                tk.Label(f_inputs, text="HostName:", font=("Segoe UI Semibold", 10)).grid(row=0, column=0, sticky="e", padx=5, pady=5)
+                host_var = tk.StringVar(value=ssh_host)
+                tk.Entry(f_inputs, textvariable=host_var, width=30).grid(row=0, column=1, padx=5, pady=5)
+
+                tk.Label(f_inputs, text="Port:", font=("Segoe UI Semibold", 10)).grid(row=1, column=0, sticky="e", padx=5, pady=5)
+                port_var = tk.StringVar(value=str(ssh_port))
+                tk.Entry(f_inputs, textvariable=port_var, width=15).grid(row=1, column=1, sticky="w", padx=5, pady=5)
+
+                def on_accept():
+                    overwrite_result[0] = (host_var.get(), port_var.get())
+                    dlg.destroy()
+
+                def on_skip():
+                    overwrite_result[0] = "SKIP"
+                    dlg.destroy()
+
+                def on_cancel():
+                    dlg.destroy()
+
+                from tkinter import ttk as _ttk
+                f_btn = tk.Frame(dlg)
+                f_btn.pack(pady=20)
+                _ttk.Button(f_btn, text="Sobreescribir y Conectar", command=on_accept).pack(side="left", padx=5)
+                _ttk.Button(f_btn, text="Usar actual y Conectar", command=on_skip).pack(side="left", padx=5)
+                _ttk.Button(f_btn, text="Cancelar", command=on_cancel).pack(side="left", padx=5)
+
+                self.root.wait_window(dlg)
+
+                if overwrite_result[0] is None:
+                    self.log_event("SSH", container_name, "WARNING", "Acceso remoto cancelado por el usuario.")
+                    return
+                elif overwrite_result[0] == "SKIP":
+                    self.log_event("SSH", container_name, "INFO", "Usando configuración SSH existente.")
+                else:
+                    ssh_host = overwrite_result[0][0]
+                    ssh_port = int(overwrite_result[0][1])
+                    config_block = _get_config_block(ssh_host, ssh_port)
+                    existing_clean = pattern.sub("", existing).rstrip("\n")
+                    new_config = (existing_clean + "\n\n" + config_block).lstrip("\n")
+                    with open(ssh_config_path, "w", encoding="utf-8", newline="\n") as fh:
+                        fh.write(new_config)
+                    self.log_event("SSH", container_name, "INFO", "Configuración SSH actualizada tras confirmación del usuario.")
+            else:
+                config_block = _get_config_block(ssh_host, ssh_port)
+                new_config = (existing.rstrip("\n") + "\n\n" + config_block).lstrip("\n")
+                with open(ssh_config_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(new_config)
+                self.log_event("SSH", container_name, "INFO", "Nueva entrada SSH creada.")
+
+            self.log_event("SSH", container_name, "INFO",
+                           f"~/.ssh/config actualizado: Host {container_name} → {ssh_host}:{ssh_port}")
+
+            # ── 7. Descubrir la ruta del tema en /app ───────────────────
+            r_theme = _exec_in_container("find /app -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1")
+            theme_path = r_theme.stdout.strip() or "/app"
+
+            # ── 8. Abrir VS Code via Remote-SSH ─────────────────────────
+            self.log_event("VSCODE", container_name, "INFO",
+                           f"Abriendo VS Code (Remote-SSH) en {container_name}:{theme_path}...")
+
+            folder_uri = f"vscode-remote://ssh-remote+{container_name}{theme_path}"
+
+            try:
+                code_exe = self._resolver_comando("code")
+            except FileNotFoundError as exc:
+                raise Exception(str(exc))
+
+            subprocess.Popen(
+                [code_exe, "--folder-uri", folder_uri],
+                creationflags=0x08000000, env=env,
+            )
+
+            messagebox.showinfo(
+                "Acceso remoto iniciado",
+                f"VS Code se está abriendo con la extensión Remote-SSH.\n\n"
+                f"Contenedor : {container_name}\n"
+                f"SSH host   : {ssh_host}:{ssh_port}\n"
+                f"Carpeta    : {theme_path}\n\n"
+                f"Si VS Code te pide la plataforma del host, selecciona 'Linux'.",
+            )
+
+        except Exception as exc:
+            error_details = traceback.format_exc()
+            self.log_event("VSCODE", container_name, "ERROR", str(exc))
+            messagebox.showerror("Error SSH/VSCode", f"Fallo en la ejecución:\n\n{error_details}")
+
+        # Ignorar respuestas obsoletas de cargas anteriores.
+        if self._profiles_loading_scope and scope != self._profiles_loading_scope:
+            self._profiles_load_job_id = self.root.after(20, self._poll_profiles_load_queue)
+            return
+
+        try:
+            self._profiles_loading = False
+            self._profiles_loading_scope = None
+            self._profiles_load_job_id = None
+            self._profiles_load_started_at = 0.0
+            self._cancel_profiles_load_guard()
+
+            if scope != self._current_profiles_scope():
+                self._set_profiles_loading_ui(False)
+                if self._profiles_load_requested:
+                    self._profiles_load_requested = False
+                    self.refresh_profiles_ui(force=True)
+                return
+
+            if ok:
+                self.profiles_data = payload if isinstance(payload, dict) else {}
+                self._profiles_remote_backoff_until = 0.0
+                if scope == "remoto":
+                    self.profiles_loading_label.configure(text=f"Perfiles remotos cargados: {len(self.profiles_data)}")
+            else:
+                self.profiles_data = {}
+                self._profiles_remote_backoff_until = time.time() + self._profiles_remote_retry_cooldown_sec
+                if scope == "remoto":
+                    self.last_docker_error_detail = str(payload)
+                    self.profiles_loading_label.configure(text="Error remoto. Pulsa 'Refrescar perfiles' para reintentar")
+
+            pending = self._profiles_pending_name
+            self._profiles_pending_name = None
+
+            prev_selected: str | None = pending
+            if prev_selected is None:
+                cur = self.profiles_listbox.curselection()
+                if cur:
+                    idx = int(cur[0])
+                    if 0 <= idx < self.profiles_listbox.size():
+                        prev_selected = self._profile_spinner_name if self._profile_spinner_job else self.profiles_listbox.get(idx)
+
+            self.profiles_listbox.configure(state="normal")
+            self.profiles_listbox.delete(0, tk.END)
+            restore_idx: int | None = None
+            for i, name in enumerate(sorted(self.profiles_data.keys(), key=str.lower)):
+                self.profiles_listbox.insert(tk.END, name)
+                if name == prev_selected:
+                    restore_idx = i
+
+            if restore_idx is not None:
+                self.profiles_listbox.selection_set(restore_idx)
+                self.profiles_listbox.see(restore_idx)
+                restored_name = self.profiles_listbox.get(restore_idx)
+                self._render_profile_containers(restored_name)
+                self.profile_name_var.set(restored_name)
+            else:
+                self._render_profile_containers()
+
+            # Quitar estado de carga solo cuando la UI final ya esta renderizada.
+            self._set_profiles_loading_ui(False)
+
+            if self._profiles_load_requested:
+                self._profiles_load_requested = False
+                self.refresh_profiles_ui(force=True)
+        except Exception as exc:
+            self.last_docker_error_detail = f"Error UI perfiles: {exc}"
+            self._fail_profiles_loading("No se pudieron pintar perfiles remotos.")
+
+    def refresh_profiles_ui(self, force: bool = False) -> None:
+        self.profiles_header_label.configure(text=self._current_profiles_label())
+        self.copy_profile_btn.configure(text=f"Copiar a {self._target_profiles_label()}")
+
+        # Mantener visible lista de contenedores aunque perfiles siga cargando.
+        self._render_profile_containers()
+
+        scope = self._current_profiles_scope()
+
+        if scope == "privado":
+            # Carga local inmediata para evitar spinner eterno en almacenamiento privado.
+            self._profiles_loading = False
+            self._profiles_loading_scope = None
+            self._profiles_load_requested = False
+            self._profiles_load_started_at = 0.0
+            self._profiles_remote_backoff_until = 0.0
+            self._set_profiles_loading_ui(False)
+            try:
+                self.profiles_data = self._read_profiles_for_scope(scope)
+            except Exception as exc:
+                self.profiles_data = {}
+                self.profiles_listbox.delete(0, tk.END)
+                self.profiles_listbox.insert(tk.END, f"No se pudieron cargar perfiles privados: {exc}")
+                self._render_profile_containers()
+                return
+
+            self.profiles_listbox.delete(0, tk.END)
+            for name in sorted(self.profiles_data.keys(), key=str.lower):
+                self.profiles_listbox.insert(tk.END, name)
+
+            self._render_profile_containers()
+            return
+
+        if (not force) and time.time() < self._profiles_remote_backoff_until:
+            self._set_profiles_loading_ui(False)
+            self.profiles_listbox.delete(0, tk.END)
+            self.profiles_listbox.insert(tk.END, "Reintento remoto en pausa")
+            self.profiles_loading_label.configure(text="Pulsa 'Refrescar perfiles' para reintentar")
+            return
+
+        # Para almacenamiento remoto intentamos leer siempre; docker_ready puede
+        # estar temporalmente desfasado y bloquear una lectura valida.
+
+        if self._profiles_loading:
+            if force:
+                self._profiles_load_requested = True
+            # Si por cualquier motivo se perdio el polling, lo reenganchamos.
+            if self._profiles_load_job_id is None:
+                self._profiles_load_job_id = self.root.after(100, self._poll_profiles_load_queue)
+            if self._profiles_load_guard_job_id is None:
+                self._profiles_load_guard_job_id = self.root.after(
+                    int((self._profiles_load_timeout_sec + 2) * 1000),
+                    self._profiles_load_guard_timeout,
+                )
+            return
+
+        # Always async so users see loading state in both stores (initial load and scope changes).
+        self._cancel_profiles_load_guard()
+        self._clear_profiles_load_queue()
+        self._set_profiles_loading_ui(True)
+        self._profiles_loading = True
+        self._profiles_loading_scope = scope
+        self._profiles_load_started_at = time.time()
+        threading.Thread(target=self._profiles_load_worker, args=(scope,), daemon=True).start()
+        if self._profiles_load_job_id is None:
+            self._profiles_load_job_id = self.root.after(100, self._poll_profiles_load_queue)
+        self._profiles_load_guard_job_id = self.root.after(
+            int((self._profiles_load_timeout_sec + 2) * 1000),
+            self._profiles_load_guard_timeout,
+        )
+
+    def on_profile_selected(self, _event: object) -> None:
+        selected = self.profiles_listbox.curselection()
+        if not selected:
+            return
+        name = self.profiles_listbox.get(selected[0])
+        self.profile_name_var.set(name)
+        self._render_profile_containers(name)
+
+    def clear_profile_editor(self) -> None:
+        self.profile_name_var.set("")
+        self.profiles_listbox.selection_clear(0, tk.END)
+        self._render_profile_containers()
+
+    def save_profile(self) -> None:
+        name = self.profile_name_var.get().strip()
+        if not name or " " in name:
+            messagebox.showwarning("Perfiles", "El nombre del perfil no puede estar vacio ni tener espacios.")
+            return
+
+        if self._current_profiles_scope() == "remoto" and self.docker_mode != "remote":
+            messagebox.showwarning("Perfiles", "Cambia a modo remoto para guardar perfiles remotos.")
+            return
+
+        selected_indexes = self.profile_containers_listbox.curselection()
+        if not selected_indexes:
+            messagebox.showwarning("Perfiles", "Selecciona al menos un contenedor para el perfil.")
+            return
+
+        containers = [self._profile_container_actual_name(self.profile_containers_listbox.get(i)) for i in selected_indexes]
+        self.profiles_data[name] = containers
+        self._write_profiles_for_current_scope(self.profiles_data)
+        scope_name = self._current_profiles_scope().upper()
+        self.log_event(f"PERFIL-{scope_name}", name, "OK", f"Guardado/actualizado: {','.join(containers)}")
+        self.refresh_profiles_ui(force=True)
+        self._select_profile_in_ui(name)
+        self.refresh_history()
+        messagebox.showinfo("Perfiles", f"Perfil guardado: {name}")
+
+    def remove_selected_from_profile(self) -> None:
+        if self._current_profiles_scope() == "remoto" and self.docker_mode != "remote":
+            messagebox.showwarning("Perfiles", "Cambia a modo remoto para editar perfiles remotos.")
+            return
+
+        selected_profile = self.profiles_listbox.curselection()
+        if not selected_profile:
+            messagebox.showwarning("Perfiles", "Selecciona un perfil.")
+            return
+
+        profile_name = self.profiles_listbox.get(selected_profile[0])
+        selected_indexes = self.profile_containers_listbox.curselection()
+        if not selected_indexes:
+            messagebox.showwarning("Perfiles", "Selecciona uno o varios contenedores para quitar del perfil.")
+            return
+
+        to_remove = {self._profile_container_actual_name(self.profile_containers_listbox.get(i)) for i in selected_indexes}
+        current = list(self.profiles_data.get(profile_name, []))
+        updated = [c for c in current if c not in to_remove]
+
+        if len(updated) == len(current):
+            messagebox.showwarning("Perfiles", "Los contenedores seleccionados no pertenecen al perfil.")
+            return
+
+        self.profiles_data[profile_name] = updated
+        self._write_profiles_for_current_scope(self.profiles_data)
+        self.profile_name_var.set(profile_name)
+        scope_name = self._current_profiles_scope().upper()
+        self.log_event(f"PERFIL-{scope_name}", profile_name, "OK", f"Contenedores quitados: {','.join(sorted(to_remove))}")
+        self.refresh_profiles_ui(force=True)
+        self._select_profile_in_ui(profile_name)
+        self.refresh_history()
+        messagebox.showinfo("Perfiles", f"Perfil actualizado: {profile_name}")
+
+    def copy_selected_profile(self) -> None:
+        selected = self.profiles_listbox.curselection()
+        if not selected:
+            messagebox.showwarning("Perfiles", "Selecciona un perfil para copiar.")
+            return
+
+        source_scope = self._current_profiles_scope()
+        target_scope = self._target_profiles_scope()
+        profile_name = self.profiles_listbox.get(selected[0])
+
+        if target_scope == "remoto" and self.docker_mode != "remote":
+            messagebox.showwarning("Perfiles", "Cambia a modo remoto para copiar perfiles al almacen remoto.")
+            return
+
+        try:
+            target_profiles = self._read_profiles_for_scope(target_scope)
+        except Exception as exc:
+            messagebox.showerror("Perfiles", f"No se pudo cargar el almacen {target_scope}: {exc}")
+            return
+
+        if profile_name in target_profiles and not messagebox.askyesno(
+            "Perfiles",
+            f"El perfil '{profile_name}' ya existe en {target_scope}. Quieres sobrescribirlo?",
+        ):
+            return
+
+        target_profiles[profile_name] = list(self.profiles_data.get(profile_name, []))
+        try:
+            self._write_profiles_for_scope(target_scope, target_profiles)
+        except Exception as exc:
+            messagebox.showerror("Perfiles", f"No se pudo copiar el perfil a {target_scope}: {exc}")
+            return
+
+        self.log_event(
+            f"PERFIL-{source_scope.upper()}",
+            profile_name,
+            "OK",
+            f"Copiado a {target_scope}",
+        )
+        self.refresh_history()
+        messagebox.showinfo("Perfiles", f"Perfil '{profile_name}' copiado a {target_scope}.")
+
+    def delete_profile(self) -> None:
+        if self._current_profiles_scope() == "remoto" and self.docker_mode != "remote":
+            messagebox.showwarning("Perfiles", "Cambia a modo remoto para borrar perfiles remotos.")
+            return
+
+        selected = self.profiles_listbox.curselection()
+        if not selected:
+            messagebox.showwarning("Perfiles", "Selecciona un perfil para eliminar.")
+            return
+        name = self.profiles_listbox.get(selected[0])
+        if not messagebox.askyesno("Perfiles", f"Eliminar perfil '{name}'?"):
+            return
+
+        if name in self.profiles_data:
+            del self.profiles_data[name]
+            self._write_profiles_for_current_scope(self.profiles_data)
+            scope_name = self._current_profiles_scope().upper()
+            self.log_event(f"PERFIL-{scope_name}", name, "OK", "Perfil eliminado")
+            self.refresh_profiles_ui(force=True)
+            self.clear_profile_editor()
+            self.refresh_history()
+            messagebox.showinfo("Perfiles", f"Perfil eliminado: {name}")
+
+    def run_selected_profile(self, mode: str) -> None:
+        selected = self.profiles_listbox.curselection()
+        if not selected:
+            messagebox.showwarning("Perfiles", "Selecciona un perfil.")
+            return
+
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        profile_name = self.profiles_listbox.get(selected[0])
+        containers = self.profiles_data.get(profile_name, [])
+        if not containers:
+            messagebox.showwarning("Perfiles", "El perfil esta vacio.")
+            return
+
+        action = "start" if mode == "start" else "stop"
+
+        for btn in self.profile_action_btns:
+            try:
+                btn.configure(state="disabled")
+            except tk.TclError:
+                pass
+        self._start_profile_spinner(profile_name)
+
+        result_q: queue.Queue[tuple[str, list[str]]] = queue.Queue()
+
+        def worker() -> None:
+            errors: list[str] = []
+            for cname in containers:
+                code, _, err = self._run(["docker", action, cname])
+                if code != 0:
+                    errors.append(f"{cname}: {err or 'error'}")
+            result_q.put(("done", errors))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll() -> None:
+            try:
+                _, errors = result_q.get_nowait()
+            except queue.Empty:
+                self.root.after(200, poll)
+                return
+
+            self._stop_profile_spinner()
+            for btn in self.profile_action_btns:
+                try:
+                    btn.configure(state="normal")
+                except tk.TclError:
+                    pass
+
+            self.refresh_everything()
+            if errors:
+                self.log_event("PERFIL", profile_name, "ERROR", "; ".join(errors))
+                messagebox.showwarning("Perfiles", "Algunas acciones fallaron:\n\n" + "\n".join(errors))
+                return
+
+            verb = "arrancado" if action == "start" else "apagado"
+            self.log_event("PERFIL", profile_name, "OK", f"Perfil {verb}")
+            self.refresh_history()
+            messagebox.showinfo("Perfiles", f"Perfil {verb}: {profile_name}")
+
+        self.root.after(200, poll)
+
+    def selected_network_name(self) -> str | None:
+        selected = self.networks_tree.selection()
+        if not selected:
+            return None
+        values = self.networks_tree.item(selected[0], "values")
+        if not values:
+            return None
+        return str(values[0])
+
+    def refresh_networks(self) -> None:
+        prev_net = self.selected_network_name()
+        prev_targets_selected: set[str] = set()
+        if hasattr(self, "network_targets_listbox"):
+            for idx in self.network_targets_listbox.curselection():
+                prev_targets_selected.add(self.network_targets_listbox.get(idx))
+
+        for item in self.networks_tree.get_children():
+            self.networks_tree.delete(item)
+        self.network_containers_listbox.delete(0, tk.END)
+
+        if not self.docker_ready():
+            self.network_data = {}
+            self.networks_tree.insert("", "end", values=("(Docker no disponible)", "-", "-"))
+            self.network_containers_listbox.insert(tk.END, "Docker no disponible")
+            self.network_container_combo.configure(values=[])
+            self.network_container_var.set("")
+            return
+
+        if not self.container_cache:
+            self.container_cache = self.get_all_container_names()
+
+        code, out, err = self._run(["docker", "network", "ls", "--format", "{{.Name}}|{{.Driver}}"])
+        if code != 0:
+            self.networks_tree.insert("", "end", values=("(Error al listar)", "-", "-"))
+            self.network_containers_listbox.insert(tk.END, "No se pudieron cargar networks")
+            messagebox.showwarning("Networks", err or "No se pudieron listar networks")
+            return
+
+        result: dict[str, dict[str, object]] = {}
+        for line in out.splitlines():
+            parts = line.split("|", 1)
+            if len(parts) != 2:
+                continue
+            name = parts[0].strip()
+            driver = parts[1].strip()
+            if name in {"bridge", "host", "none"}:
+                continue
+            result[name] = {"driver": driver, "containers": []}
+
+        for cname in self.container_cache:
+            code_i, out_i, _ = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+                    cname,
+                ]
+            )
+            if code_i != 0:
+                continue
+            connected = [x.strip() for x in out_i.split() if x.strip()]
+            for net in connected:
+                if net in result:
+                    containers = result[net]["containers"]
+                    if isinstance(containers, list):
+                        containers.append(cname)
+
+        self.network_data = result
+        if not result:
+            self.networks_tree.insert("", "end", values=("(sin networks)", "-", "0"))
+        for name in sorted(result.keys(), key=str.lower):
+            info = result[name]
+            containers = info["containers"]
+            count = len(containers) if isinstance(containers, list) else 0
+            self.networks_tree.insert("", "end", values=(name, str(info["driver"]), count))
+
+        if prev_net:
+            restored_iid: str | None = None
+            for iid in self.networks_tree.get_children():
+                values = self.networks_tree.item(iid, "values")
+                if values and str(values[0]) == prev_net:
+                    restored_iid = iid
+                    break
+
+            if restored_iid is not None:
+                self.networks_tree.selection_set(restored_iid)
+                self.networks_tree.focus(restored_iid)
+                self.networks_tree.see(restored_iid)
+
+                info = self.network_data.get(prev_net, {})
+                containers = info.get("containers", [])
+                if isinstance(containers, list):
+                    for cname in containers:
+                        self.network_containers_listbox.insert(tk.END, cname)
+
+        self.network_container_combo.configure(values=self.container_cache)
+        if hasattr(self, "network_targets_listbox"):
+            self.network_targets_listbox.delete(0, tk.END)
+            for cname in self.container_cache:
+                self.network_targets_listbox.insert(tk.END, cname)
+            if prev_targets_selected:
+                for idx in range(self.network_targets_listbox.size()):
+                    cname = self.network_targets_listbox.get(idx)
+                    if cname in prev_targets_selected:
+                        self.network_targets_listbox.selection_set(idx)
+        if self.container_cache and not self.network_container_var.get():
+            self.network_container_var.set(self.container_cache[0])
+
+    def on_network_selected(self, _event: object) -> None:
+        self.network_containers_listbox.delete(0, tk.END)
+        net_name = self.selected_network_name()
+        if not net_name:
+            return
+        info = self.network_data.get(net_name, {})
+        containers = info.get("containers", [])
+        if isinstance(containers, list):
+            for cname in containers:
+                self.network_containers_listbox.insert(tk.END, cname)
+
+    def create_network(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+        name = simpledialog.askstring("Crear network", "Nombre de la nueva network:")
+        if not name:
+            return
+        driver = self.network_driver_var.get().strip() or "bridge"
+        code, _, err = self._run(["docker", "network", "create", "--driver", driver, name.strip()])
+        if code != 0:
+            self.log_event("NETWORK", name.strip(), "ERROR", err or "No se pudo crear")
+            messagebox.showerror("Networks", err or "No se pudo crear la network")
+            return
+        self.log_event("NETWORK", name.strip(), "OK", f"Network creada con driver {driver}")
+        self.refresh_networks()
+        self.refresh_history()
+        messagebox.showinfo("Networks", f"Network creada: {name.strip()} (driver: {driver})")
+
+    def delete_network(self) -> None:
+        net_name = self.selected_network_name()
+        if not net_name:
+            messagebox.showwarning("Networks", "Selecciona una network para eliminar.")
+            return
+        if not messagebox.askyesno("Networks", f"Eliminar network '{net_name}'?"):
+            return
+        code, _, err = self._run(["docker", "network", "rm", net_name])
+        if code != 0:
+            self.log_event("NETWORK", net_name, "ERROR", err or "No se pudo eliminar")
+            messagebox.showerror("Networks", err or "No se pudo eliminar la network")
+            return
+        self.log_event("NETWORK", net_name, "OK", "Network eliminada")
+        self.refresh_networks()
+        self.refresh_history()
+        messagebox.showinfo("Networks", f"Network eliminada: {net_name}")
+
+    def rename_network(self) -> None:
+        old_name = self.selected_network_name()
+        if not old_name:
+            messagebox.showwarning("Networks", "Selecciona una network para renombrar.")
+            return
+
+        new_name = simpledialog.askstring("Renombrar network", f"Nuevo nombre para '{old_name}':")
+        if not new_name:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == old_name:
+            messagebox.showwarning("Networks", "Nombre nuevo no valido.")
+            return
+
+        code, _, err = self._run(["docker", "network", "create", new_name])
+        if code != 0:
+            self.log_event("NETWORK", new_name, "ERROR", err or "No se pudo crear nueva network")
+            messagebox.showerror("Networks", err or "No se pudo crear la nueva network")
+            return
+
+        old_containers = self.network_data.get(old_name, {}).get("containers", [])
+        if isinstance(old_containers, list):
+            for cname in old_containers:
+                self._run(["docker", "network", "connect", new_name, cname])
+                self._run(["docker", "network", "disconnect", old_name, cname])
+
+        code_rm, _, err_rm = self._run(["docker", "network", "rm", old_name])
+        if code_rm != 0:
+            self.log_event("NETWORK", old_name, "WARN", f"Creada {new_name}, no se pudo eliminar original")
+            messagebox.showwarning(
+                "Networks",
+                f"Se creo '{new_name}', pero no se pudo eliminar '{old_name}'.\n\n{err_rm or ''}",
+            )
+        else:
+            self.log_event("NETWORK", old_name, "OK", f"Renombrada a {new_name}")
+            messagebox.showinfo("Networks", f"Network renombrada: {old_name} -> {new_name}")
+
+        self.refresh_networks()
+        self.refresh_history()
+
+    def connect_container_to_network(self) -> None:
+        net_name = self.selected_network_name()
+        if not net_name:
+            messagebox.showwarning("Networks", "Selecciona una network.")
+            return
+
+        targets: list[str] = []
+        if hasattr(self, "network_targets_listbox"):
+            for idx in self.network_targets_listbox.curselection():
+                cname = self.network_targets_listbox.get(idx)
+                if cname and cname not in targets:
+                    targets.append(cname)
+        if not targets:
+            container = self.network_container_var.get().strip()
+            if container:
+                targets = [container]
+
+        if not targets:
+            messagebox.showwarning("Networks", "Selecciona un contenedor objetivo.")
+            return
+
+        errors: list[str] = []
+        ok_targets: list[str] = []
+        for container in targets:
+            code, _, err = self._run(["docker", "network", "connect", net_name, container])
+            if code != 0:
+                errors.append(f"{container}: {err or 'error'}")
+            else:
+                ok_targets.append(container)
+
+        self.refresh_networks()
+        self.refresh_history()
+        if ok_targets:
+            self.log_event("NETWORK", net_name, "OK", f"Conectados: {', '.join(ok_targets)}")
+        if errors:
+            self.log_event("NETWORK", net_name, "ERROR", "; ".join(errors))
+            messagebox.showwarning(
+                "Networks",
+                "Algunas conexiones fallaron.\n\n"
+                + (f"Conectados: {', '.join(ok_targets)}\n\n" if ok_targets else "")
+                + "Errores:\n"
+                + "\n".join(errors),
+            )
+            return
+        messagebox.showinfo("Networks", f"Contenedores conectados: {', '.join(ok_targets)} -> {net_name}")
+
+    def disconnect_container_from_network(self) -> None:
+        net_name = self.selected_network_name()
+        if not net_name:
+            messagebox.showwarning("Networks", "Selecciona una network.")
+            return
+
+        targets: list[str] = []
+        if hasattr(self, "network_targets_listbox"):
+            for idx in self.network_targets_listbox.curselection():
+                cname = self.network_targets_listbox.get(idx)
+                if cname and cname not in targets:
+                    targets.append(cname)
+        if not targets:
+            container = self.network_container_var.get().strip()
+            if container:
+                targets = [container]
+
+        if not targets:
+            messagebox.showwarning("Networks", "Selecciona uno o varios contenedores objetivo.")
+            return
+
+        errors: list[str] = []
+        ok_targets: list[str] = []
+        for container in targets:
+            code, _, err = self._run(["docker", "network", "disconnect", net_name, container])
+            if code != 0:
+                errors.append(f"{container}: {err or 'error'}")
+            else:
+                ok_targets.append(container)
+
+        self.refresh_networks()
+        self.refresh_history()
+        if ok_targets:
+            self.log_event("NETWORK", net_name, "OK", f"Desconectados: {', '.join(ok_targets)}")
+        if errors:
+            self.log_event("NETWORK", net_name, "ERROR", "; ".join(errors))
+            messagebox.showwarning(
+                "Networks",
+                "Algunas desconexiones fallaron.\n\n"
+                + (f"Desconectados: {', '.join(ok_targets)}\n\n" if ok_targets else "")
+                + "Errores:\n"
+                + "\n".join(errors),
+            )
+            return
+        messagebox.showinfo("Networks", f"Contenedores desconectados: {', '.join(ok_targets)} de {net_name}")
+
+    def selected_volume_names(self) -> list[str]:
+        names: list[str] = []
+        if not hasattr(self, "volumes_tree"):
+            return names
+        for item_id in self.volumes_tree.selection():
+            values = self.volumes_tree.item(item_id, "values")
+            if not values:
+                continue
+            name = str(values[0]).strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def refresh_volumes(self) -> None:
+        if not hasattr(self, "volumes_tree"):
+            return
+
+        prev_selected = set(self.selected_volume_names())
+        for item in self.volumes_tree.get_children():
+            self.volumes_tree.delete(item)
+        if hasattr(self, "volume_containers_listbox"):
+            self.volume_containers_listbox.delete(0, tk.END)
+
+        if not self.docker_ready():
+            self.volume_data = {}
+            self.volumes_tree.insert("", "end", values=("(Docker no disponible)", "-", "-", "-", "-"))
+            if hasattr(self, "volume_containers_listbox"):
+                self.volume_containers_listbox.insert(tk.END, "Docker no disponible")
+            return
+
+        if not self.container_cache:
+            self.container_cache = self.get_all_container_names()
+
+        code, out, err = self._run(
+            ["docker", "volume", "ls", "--format", "{{.Name}}|{{.Driver}}|{{.Scope}}|{{.Mountpoint}}"]
+        )
+        if code != 0:
+            self.volumes_tree.insert("", "end", values=("(Error al listar)", "-", "-", "-", "-"))
+            if hasattr(self, "volume_containers_listbox"):
+                self.volume_containers_listbox.insert(tk.END, "No se pudieron cargar volumes")
+            messagebox.showwarning("Volumes", err or "No se pudieron listar volumes")
+            return
+
+        result: dict[str, dict[str, object]] = {}
+        for line in out.splitlines():
+            parts = line.split("|", 3)
+            if len(parts) < 2:
+                continue
+            name = parts[0].strip()
+            if not name:
+                continue
+            driver = parts[1].strip() if len(parts) >= 2 else ""
+            scope = parts[2].strip() if len(parts) >= 3 else ""
+            mountpoint = parts[3].strip() if len(parts) >= 4 else ""
+            result[name] = {
+                "driver": driver,
+                "scope": scope,
+                "mountpoint": mountpoint,
+                "containers": [],
+            }
+
+        for cname in self.container_cache:
+            code_i, out_i, _ = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}",
+                    cname,
+                ]
+            )
+            if code_i != 0:
+                continue
+            for vname in [x.strip() for x in out_i.split() if x.strip()]:
+                if vname in result:
+                    containers = result[vname]["containers"]
+                    if isinstance(containers, list):
+                        containers.append(cname)
+
+        self.volume_data = result
+        if not result:
+            self.volumes_tree.insert("", "end", values=("(sin volumes)", "-", "-", "0", "-"))
+        for name in sorted(result.keys(), key=str.lower):
+            info = result[name]
+            containers = info.get("containers", [])
+            in_use = len(containers) if isinstance(containers, list) else 0
+            iid = self.volumes_tree.insert(
+                "",
+                "end",
+                values=(
+                    name,
+                    str(info.get("driver", "")),
+                    str(info.get("scope", "")),
+                    in_use,
+                    str(info.get("mountpoint", "")),
+                ),
+            )
+            if name in prev_selected:
+                self.volumes_tree.selection_add(iid)
+
+        self.on_volume_selected(None)
+
+    def on_volume_selected(self, _event: object | None) -> None:
+        if not hasattr(self, "volume_containers_listbox"):
+            return
+        self.volume_containers_listbox.delete(0, tk.END)
+        selected = self.selected_volume_names()
+        if not selected:
+            return
+        if len(selected) > 1:
+            self.volume_containers_listbox.insert(tk.END, "(Seleccion multiple)")
+            return
+
+        info = self.volume_data.get(selected[0], {})
+        containers = info.get("containers", [])
+        if isinstance(containers, list) and containers:
+            for cname in containers:
+                self.volume_containers_listbox.insert(tk.END, cname)
+        else:
+            self.volume_containers_listbox.insert(tk.END, "(No esta siendo usado)")
+
+    def create_volume(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+        name = simpledialog.askstring("Crear volume", "Nombre del nuevo volume:")
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning("Volumes", "Nombre no valido.")
+            return
+        driver = self.volume_driver_var.get().strip() or "local"
+        code, _, err = self._run(["docker", "volume", "create", "--driver", driver, name])
+        if code != 0:
+            self.log_event("VOLUME", name, "ERROR", err or "No se pudo crear")
+            messagebox.showerror("Volumes", err or "No se pudo crear el volume")
+            return
+        self.log_event("VOLUME", name, "OK", f"Volume creado con driver {driver}")
+        self.refresh_volumes()
+        self.refresh_history()
+        messagebox.showinfo("Volumes", f"Volume creado: {name} (driver: {driver})")
+
+    def inspect_selected_volumes(self) -> None:
+        names = self.selected_volume_names()
+        if not names:
+            messagebox.showwarning("Volumes", "Selecciona uno o varios volumes para inspeccionar.")
+            return
+        code, out, err = self._run(["docker", "volume", "inspect", *names])
+        if code != 0:
+            self.log_event("VOLUME", ", ".join(names), "ERROR", err or "No se pudo inspeccionar")
+            messagebox.showerror("Volumes", err or "No se pudo inspeccionar el volume")
+            return
+        self._open_text_viewer("Inspeccion de volumes", out.strip() or "(Sin datos)")
+
+    def delete_selected_volumes(self) -> None:
+        names = self.selected_volume_names()
+        if not names:
+            messagebox.showwarning("Volumes", "Selecciona uno o varios volumes para eliminar.")
+            return
+        if not messagebox.askyesno("Volumes", f"Eliminar {len(names)} volume(s)?\n\n" + "\n".join(names)):
+            return
+
+        errors: list[str] = []
+        ok_names: list[str] = []
+        for name in names:
+            code, _, err = self._run(["docker", "volume", "rm", "-f", name])
+            if code != 0:
+                errors.append(f"{name}: {err or 'error'}")
+            else:
+                ok_names.append(name)
+
+        self.refresh_volumes()
+        self.refresh_history()
+        if ok_names:
+            self.log_event("VOLUME", ", ".join(ok_names), "OK", "Volume(s) eliminado(s)")
+        if errors:
+            self.log_event("VOLUME", ", ".join(names), "ERROR", "; ".join(errors))
+            messagebox.showwarning(
+                "Volumes",
+                "Algunas eliminaciones fallaron.\n\n"
+                + (f"Eliminados: {', '.join(ok_names)}\n\n" if ok_names else "")
+                + "Errores:\n"
+                + "\n".join(errors),
+            )
+            return
+        messagebox.showinfo("Volumes", f"Volume(s) eliminados: {', '.join(ok_names)}")
+
+    def prune_volumes(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+        protected = {self.remote_history_volume, self.remote_profiles_volume}
+
+        code, out, err = self._run(["docker", "volume", "ls", "--format", "{{.Name}}"])
+        if code != 0:
+            self.log_event("VOLUME", "prune", "ERROR", err or "No se pudo listar volumes")
+            messagebox.showerror("Volumes", err or "No se pudieron listar volumes")
+            return
+
+        all_volumes = [line.strip() for line in out.splitlines() if line.strip()]
+        if not all_volumes:
+            messagebox.showinfo("Volumes", "No hay volumes para evaluar.")
+            return
+
+        if not self.container_cache:
+            self.container_cache = self.get_all_container_names()
+
+        used_volumes: set[str] = set()
+        for cname in self.container_cache:
+            code_i, out_i, _ = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}",
+                    cname,
+                ]
+            )
+            if code_i != 0:
+                continue
+            for vname in [x.strip() for x in out_i.split() if x.strip()]:
+                used_volumes.add(vname)
+
+        removable = [v for v in all_volumes if v not in protected and v not in used_volumes]
+
+        if not removable:
+            messagebox.showinfo(
+                "Volumes",
+                "No hay volumes sin uso para eliminar.\n\n"
+                f"Protegidos siempre: {self.remote_history_volume}, {self.remote_profiles_volume}",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Volumes",
+            "Eliminar volumes sin uso?\n\n"
+            f"Se protegeran siempre: {self.remote_history_volume}, {self.remote_profiles_volume}\n\n"
+            f"Se intentaran eliminar {len(removable)} volume(s).",
+        ):
+            return
+
+        removed: list[str] = []
+        errors: list[str] = []
+        for vname in removable:
+            code_rm, _, err_rm = self._run(["docker", "volume", "rm", "-f", vname])
+            if code_rm == 0:
+                removed.append(vname)
+            else:
+                errors.append(f"{vname}: {err_rm or 'error'}")
+
+        detail = (
+            f"Eliminados={len(removed)}; protegidos={len([v for v in all_volumes if v in protected])}; "
+            f"en uso={len(used_volumes)}"
+        )
+        if errors:
+            self.log_event("VOLUME", "prune", "WARN", detail + "; errores=" + " | ".join(errors))
+        else:
+            self.log_event("VOLUME", "prune", "OK", detail)
+
+        self.refresh_volumes()
+        self.refresh_history()
+
+        if errors:
+            messagebox.showwarning(
+                "Volumes",
+                "Prune parcial completado.\n\n"
+                f"Eliminados: {len(removed)}\n"
+                f"Protegidos: {self.remote_history_volume}, {self.remote_profiles_volume}\n\n"
+                "Errores:\n" + "\n".join(errors),
+            )
+            return
+
+        messagebox.showinfo(
+            "Volumes",
+            "Prune completado.\n\n"
+            f"Eliminados: {len(removed)}\n"
+            f"Protegidos: {self.remote_history_volume}, {self.remote_profiles_volume}",
+        )
+
+    def clone_volume(self) -> None:
+        names = self.selected_volume_names()
+        if len(names) != 1:
+            messagebox.showwarning("Volumes", "Selecciona un unico volume de origen para clonar.")
+            return
+
+        source_name = names[0]
+        target_name = simpledialog.askstring("Clonar volume", f"Nuevo nombre para el clon de '{source_name}':")
+        if not target_name:
+            return
+        target_name = target_name.strip()
+        if not target_name:
+            messagebox.showwarning("Volumes", "Nombre destino no valido.")
+            return
+        if target_name == source_name:
+            messagebox.showwarning("Volumes", "El nombre destino debe ser diferente al origen.")
+            return
+
+        code_create, _, err_create = self._run(["docker", "volume", "create", target_name])
+        if code_create != 0:
+            self.log_event("VOLUME", target_name, "ERROR", err_create or "No se pudo crear volume destino")
+            messagebox.showerror("Volumes", err_create or "No se pudo crear el volume destino")
+            return
+
+        code_copy, _, err_copy = self._run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                f"{source_name}:/from:ro",
+                "-v",
+                f"{target_name}:/to",
+                "busybox",
+                "sh",
+                "-c",
+                "cd /from && tar cf - . | tar xf - -C /to",
+            ]
+        )
+        if code_copy != 0:
+            self.log_event("VOLUME", source_name, "ERROR", err_copy or "Fallo al clonar datos")
+            messagebox.showerror("Volumes", err_copy or "No se pudo clonar el volume")
+            return
+
+        self.log_event("VOLUME", source_name, "OK", f"Clonado en {target_name}")
+        self.refresh_volumes()
+        self.refresh_history()
+        messagebox.showinfo("Volumes", f"Volume clonado: {source_name} -> {target_name}")
+
+    def clear_volume_contents(self) -> None:
+        names = self.selected_volume_names()
+        if len(names) != 1:
+            messagebox.showwarning("Volumes", "Selecciona un unico volume para vaciar su contenido.")
+            return
+        vname = names[0]
+        if not messagebox.askyesno(
+            "Volumes",
+            f"Vaciar TODO el contenido de '{vname}'?\n\nEsta accion no se puede deshacer.",
+        ):
+            return
+
+        code, _, err = self._run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                f"{vname}:/data",
+                "busybox",
+                "sh",
+                "-c",
+                "rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null || true",
+            ]
+        )
+        if code != 0:
+            self.log_event("VOLUME", vname, "ERROR", err or "No se pudo vaciar")
+            messagebox.showerror("Volumes", err or "No se pudo vaciar el volume")
+            return
+
+        self.log_event("VOLUME", vname, "OK", "Contenido eliminado")
+        self.refresh_history()
+        messagebox.showinfo("Volumes", f"Volume vaciado: {vname}")
+
+    def _open_text_viewer(self, title: str, content: str) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("900x520")
+        dialog.minsize(640, 380)
+        dialog.transient(self.root)
+
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        text = tk.Text(
+            frame,
+            wrap="none",
+            bg="#ffffff",
+            fg="#1f2937",
+            insertbackground="#1f2937",
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=0,
+            font=("Consolas", 10),
+        )
+        text.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=y_scroll.set)
+
+        x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        text.configure(xscrollcommand=x_scroll.set)
+
+        text.insert("1.0", content)
+        text.configure(state="disabled")
+
+        actions = ttk.Frame(dialog, padding=(10, 0, 10, 10))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="Cerrar", command=dialog.destroy).pack(side="right")
+
+    def refresh_history(self) -> None:
+        if not self._is_history_tab_visible():
+            return
+
+        if self._history_refresh_in_progress:
+            self._history_refresh_requested = True
+            return
+
+        self._history_refresh_in_progress = True
+        threading.Thread(target=self._history_refresh_worker, daemon=True).start()
+
+        if self._history_refresh_job_id is None:
+            self._history_refresh_job_id = self.root.after(100, self._poll_history_refresh_queue)
+
+    def refresh_logs_targets(self) -> None:
+        values = self.container_cache[:]
+        self.log_container_combo.configure(values=values)
+        if values and self.log_container_var.get() not in values:
+            self.log_container_var.set(values[0])
+        if not values:
+            self._stop_follow_logs()
+            self.log_container_var.set("")
+
+    def _parse_log_lines(self) -> int:
+        raw = self.log_lines_var.get().strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 100
+        value = max(10, min(5000, value))
+        self.log_lines_var.set(str(value))
+        return value
+
+    def fetch_logs(self, preserve_scroll: bool = False) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        container = self.log_container_var.get().strip()
+        if not container:
+            messagebox.showwarning("Logs", "Selecciona un contenedor.")
+            return
+
+        tail = self._parse_log_lines()
+
+        if self.log_follow_var.get():
+            self._start_follow_logs(container, tail)
+            return
+
+        saved_x = self.logs_text.xview()[0] if preserve_scroll else 0.0
+        saved_y = self.logs_text.yview()[0] if preserve_scroll else None
+
+        self._stop_follow_logs()
+        code, out, err = self._run(["docker", "logs", "--tail", str(tail), container])
+
+        content_parts = []
+        if out:
+            content_parts.append(out)
+        if err:
+            content_parts.append(err)
+        content = "\n".join(content_parts).strip()
+        if not content:
+            content = "(Sin salida de logs en este momento)"
+
+        self.logs_text.configure(state="normal")
+        self.logs_text.delete("1.0", tk.END)
+        self.logs_text.insert(tk.END, content)
+
+        if preserve_scroll:
+            self.logs_text.xview_moveto(saved_x)
+            self.logs_text.yview_moveto(saved_y)
+        else:
+            self.logs_text.see(tk.END)
+            self.logs_text.xview_moveto(0.0)
+
+        self.logs_text.configure(state="disabled")
+
+        if code == 0:
+            self.log_event("LOGS", container, "OK", f"Ultimas {tail} lineas")
+        else:
+            self.log_event("LOGS", container, "ERROR", f"Fallo al leer logs: {err or 'error'}")
+        self.refresh_history()
+
+    def _auto_fetch_logs(self) -> None:
+        if not self.log_auto_refresh_var.get():
+            return
+        if self.log_follow_var.get():
+            return
+        self.fetch_logs(preserve_scroll=True)
+        self.logs_refresh_job_id = self.root.after(4000, self._auto_fetch_logs)
+
+    def toggle_logs_auto_refresh(self) -> None:
+        if self.logs_refresh_job_id is not None:
+            self.root.after_cancel(self.logs_refresh_job_id)
+            self.logs_refresh_job_id = None
+
+        if self.log_auto_refresh_var.get() and self.log_follow_var.get():
+            self.log_auto_refresh_var.set(False)
+            messagebox.showinfo("Logs", "Desactiva 'Seguir (-f)' para usar Auto-refresco.")
+            return
+
+        if self.log_auto_refresh_var.get():
+            self._auto_fetch_logs()
+
+    def on_follow_mode_toggled(self) -> None:
+        if self.log_follow_var.get() and self.log_auto_refresh_var.get():
+            self.log_auto_refresh_var.set(False)
+            if self.logs_refresh_job_id is not None:
+                self.root.after_cancel(self.logs_refresh_job_id)
+                self.logs_refresh_job_id = None
+
+        if not self.log_follow_var.get():
+            self._stop_follow_logs()
+
+    def _start_follow_logs(self, container: str, tail: int) -> None:
+        self._stop_follow_logs()
+        if self._should_use_docker_sdk():
+            self._start_follow_logs_sdk(container, tail)
+            return
+        try:
+            cmd = self._build_docker_command(["docker", "logs", "-f", "--tail", str(tail), container])
+            self.logs_follow_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=self.tools_dir,
+                shell=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception as exc:
+            self.log_event("LOGS", container, "ERROR", f"Fallo al iniciar seguimiento: {exc}")
+            self.refresh_history()
+            messagebox.showerror("Logs", f"No se pudo iniciar seguimiento de logs.\n\n{exc}")
+            return
+
+        self.logs_text.configure(state="normal")
+        self.logs_text.delete("1.0", tk.END)
+        self.logs_text.insert(tk.END, f"Siguiendo logs de {container}... (Ctrl + boton para detener cambiando modo)\n\n")
+        self.logs_text.configure(state="disabled")
+
+        reader_thread = threading.Thread(target=self._read_follow_output, daemon=True)
+        reader_thread.start()
+        self.logs_follow_poll_job_id = self.root.after(150, self._poll_follow_output)
+        self.log_event("LOGS", container, "INFO", f"Seguimiento en vivo iniciado (tail={tail})")
+        self.refresh_history()
+
+    def _start_follow_logs_sdk(self, container: str, tail: int) -> None:
+        client = self._get_docker_sdk_client(timeout_seconds=300)
+        if client is None:
+            messagebox.showerror("Logs", "Docker SDK no disponible para seguimiento en vivo.")
+            return
+
+        try:
+            client.api.timeout = None
+        except Exception:
+            pass
+
+        try:
+            cont = client.containers.get(container)
+            stream = cont.logs(stream=True, follow=True, tail=tail, stdout=True, stderr=True)
+        except Exception as exc:
+            self.log_event("LOGS", container, "ERROR", f"Fallo al iniciar seguimiento SDK: {exc}")
+            self.refresh_history()
+            messagebox.showerror("Logs", f"No se pudo iniciar seguimiento de logs.\n\n{exc}")
+            return
+
+        self._sdk_follow_stop_event = threading.Event()
+        self._sdk_follow_active = True
+
+        self.logs_text.configure(state="normal")
+        self.logs_text.delete("1.0", tk.END)
+        self.logs_text.insert(tk.END, f"Siguiendo logs de {container}... (modo SDK)\n\n")
+        self.logs_text.configure(state="disabled")
+
+        reader_thread = threading.Thread(target=self._read_follow_output_sdk, args=(stream,), daemon=True)
+        reader_thread.start()
+        self.logs_follow_poll_job_id = self.root.after(150, self._poll_follow_output)
+        self.log_event("LOGS", container, "INFO", f"Seguimiento en vivo iniciado (SDK, tail={tail})")
+        self.refresh_history()
+
+    def _read_follow_output_sdk(self, stream: object) -> None:
+        try:
+            for chunk in stream:
+                if self._sdk_follow_stop_event is not None and self._sdk_follow_stop_event.is_set():
+                    break
+                if isinstance(chunk, (bytes, bytearray)):
+                    text = chunk.decode("utf-8", errors="replace")
+                else:
+                    text = str(chunk)
+                if text:
+                    self.logs_follow_queue.put(text)
+        except Exception as exc:
+            self.logs_follow_queue.put(f"\n[seguimiento finalizado con error: {exc}]\n")
+        finally:
+            self._sdk_follow_active = False
+
+    def _read_follow_output(self) -> None:
+        process = self.logs_follow_process
+        if process is None or process.stdout is None:
+            return
+
+        for line in process.stdout:
+            self.logs_follow_queue.put(line)
+
+    def _poll_follow_output(self) -> None:
+        chunks: list[str] = []
+        while True:
+            try:
+                chunks.append(self.logs_follow_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if chunks:
+            self.logs_text.configure(state="normal")
+            self.logs_text.insert(tk.END, "".join(chunks))
+            self.logs_text.see(tk.END)
+            self.logs_text.configure(state="disabled")
+
+        process = self.logs_follow_process
+        if process is None:
+            if self._sdk_follow_active:
+                self.logs_follow_poll_job_id = self.root.after(150, self._poll_follow_output)
+                return
+            self.logs_follow_poll_job_id = None
+            return
+
+        if process.poll() is None:
+            self.logs_follow_poll_job_id = self.root.after(150, self._poll_follow_output)
+            return
+
+        self.logs_follow_poll_job_id = None
+        exit_code = process.returncode
+        self.logs_text.configure(state="normal")
+        self.logs_text.insert(tk.END, f"\n[seguimiento finalizado, codigo {exit_code}]\n")
+        self.logs_text.see(tk.END)
+        self.logs_text.configure(state="disabled")
+        self.logs_follow_process = None
+
+    def _stop_follow_logs(self) -> None:
+        if self.logs_follow_poll_job_id is not None:
+            self.root.after_cancel(self.logs_follow_poll_job_id)
+            self.logs_follow_poll_job_id = None
+
+        if self._sdk_follow_stop_event is not None:
+            self._sdk_follow_stop_event.set()
+            self._sdk_follow_stop_event = None
+        self._sdk_follow_active = False
+
+        process = self.logs_follow_process
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            self.logs_follow_process = None
+
+        while True:
+            try:
+                self.logs_follow_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def on_close(self) -> None:
+        if self.refresh_job_id is not None:
+            self.root.after_cancel(self.refresh_job_id)
+            self.refresh_job_id = None
+        if self.logs_refresh_job_id is not None:
+            self.root.after_cancel(self.logs_refresh_job_id)
+            self.logs_refresh_job_id = None
+        if self._docker_check_job_id is not None:
+            self.root.after_cancel(self._docker_check_job_id)
+            self._docker_check_job_id = None
+        if self._history_refresh_job_id is not None:
+            self.root.after_cancel(self._history_refresh_job_id)
+            self._history_refresh_job_id = None
+        if self._profiles_load_job_id is not None:
+            self.root.after_cancel(self._profiles_load_job_id)
+            self._profiles_load_job_id = None
+        self._stop_status_spinner()
+        self._stop_container_spinner()
+        self._stop_profile_spinner()
+        self._stop_follow_logs()
+        self.root.destroy()
+
+    def export_visible_logs(self) -> None:
+        content = self.logs_text.get("1.0", tk.END).strip()
+        if not content or content == "Selecciona un contenedor y pulsa 'Ver logs'.":
+            messagebox.showwarning("Logs", "No hay contenido de logs para exportar.")
+            return
+
+        container = self.log_container_var.get().strip() or "contenedor"
+        # Sanitize container name for Windows filenames
+        invalid_chars = '<>:"/\\|?*'
+        safe_container = ''.join('_' if c in invalid_chars else c for c in container)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"logs_{safe_container}_{stamp}.txt"
+
+        output_path = filedialog.asksaveasfilename(
+            title="Guardar logs como",
+            initialdir=self.tools_dir,
+            initialfile=default_name,
+            defaultextension=".txt",
+            filetypes=[("Archivo de texto", "*.txt"), ("Todos los archivos", "*.*")],
+        )
+
+        if not output_path:
+            return
+
+        try:
+            with open(output_path, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(content)
+            self.log_event("LOGS", container, "OK", f"Exportado a {output_path}")
+            self.refresh_history()
+            messagebox.showinfo("Logs", f"Logs exportados correctamente.\n\n{output_path}")
+        except Exception as exc:
+            self.log_event("LOGS", container, "ERROR", f"Fallo al exportar: {exc}")
+            self.refresh_history()
+            messagebox.showerror("Logs", f"No se pudieron exportar los logs.\n\n{exc}")
+
+    def copy_visible_logs(self) -> None:
+        content = self.logs_text.get("1.0", tk.END).strip()
+        if not content or content == "Selecciona un contenedor y pulsa 'Ver logs'.":
+            messagebox.showwarning("Logs", "No hay contenido visible para copiar.")
+            return
+
+        container = self.log_container_var.get().strip() or "contenedor"
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update()
+        self.log_event("LOGS", container, "INFO", "Contenido visible copiado al portapapeles")
+        self.refresh_history()
+        messagebox.showinfo("Logs", "Contenido copiado al portapapeles.")
+
+    def apply_history_filter(self, _event: object = None) -> None:
+        level = self.history_level_var.get().strip().upper()
+        query = self.history_search_var.get().strip()
+        query_tokens = [
+            token
+            for token in self._normalize_text(query).split()
+            if token
+        ]
+
+        filtered: list[str] = []
+        for line in self.history_lines:
+            detected_level = self._detect_history_level(line)
+            if level != "TODOS" and detected_level != level:
+                continue
+            if query_tokens:
+                normalized_line = self._normalize_text(line)
+                if not all(token in normalized_line for token in query_tokens):
+                    continue
+            filtered.append(line)
+
+        x_first, _x_last = self.history_text.xview()
+        y_first, _y_last = self.history_text.yview()
+
+        self.history_text.configure(state="normal")
+        self.history_text.delete("1.0", tk.END)
+        if filtered:
+            self.history_text.insert(tk.END, "\n".join(filtered))
+        else:
+            self.history_text.insert(tk.END, "Sin registros para el filtro actual.")
+        self.history_text.xview_moveto(x_first)
+        self.history_text.yview_moveto(y_first)
+        self.history_text.configure(state="disabled")
+
+    @staticmethod
+    def _detect_history_level(line: str) -> str:
+        upper = line.upper()
+
+        # Formato heredado: ... RESULTADO=OK ...
+        match_resultado = re.search(r"\bRESULTADO\s*=\s*(OK|ERROR|WARN|INFO)\b", upper)
+        if match_resultado:
+            return match_resultado.group(1)
+
+        # Formato GUI actual: [OK] / [ERROR] / [WARN] / [INFO]
+        match_brackets = re.search(r"\[(OK|ERROR|WARN|INFO)\]", upper)
+        if match_brackets:
+            return match_brackets.group(1)
+
+        return "INFO"
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", value)
+        no_accents = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        return no_accents.lower()
+
+    def clear_history_filters(self) -> None:
+        self.history_level_var.set("TODOS")
+        self.history_search_var.set("")
+        self.apply_history_filter()
+
+    def copy_visible_history(self) -> None:
+        content = self.history_text.get("1.0", tk.END).strip()
+        if not content or content == "Sin registros para el filtro actual.":
+            messagebox.showwarning("Historial", "No hay contenido visible para copiar.")
+            return
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update()
+        self.log_event("HISTORIAL", "visible", "INFO", "Contenido copiado al portapapeles")
+        self.refresh_history()
+        messagebox.showinfo("Historial", "Contenido copiado al portapapeles.")
+
+    def launch_bat(self, bat_name: str, args: str = "", maximized: bool = False) -> None:
+        bat_path = os.path.join(self.tools_dir, bat_name)
+        if not os.path.isfile(bat_path):
+            messagebox.showerror("Archivo", f"No se encontro:\n{bat_path}")
+            return
+
+        if maximized:
+            cmd = f'start "" /wait cmd /c ""{bat_path}" maximizado"'
+        elif args:
+            cmd = f'start "" /wait cmd /c ""{bat_path}" {args}"'
+        else:
+            cmd = f'start "" /wait cmd /c ""{bat_path}""'
+
+        try:
+            subprocess.Popen(cmd, cwd=self.tools_dir, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.log_event("SCRIPT", bat_name, "INFO", f"Lanzado con args: {args or '-'}")
+            self.refresh_history()
+        except Exception as exc:  # pragma: no cover
+            self.log_event("SCRIPT", bat_name, "ERROR", str(exc))
+            messagebox.showerror("Ejecucion", f"No se pudo ejecutar {bat_name}.\n\n{exc}")
+
+    @staticmethod
+    def _is_host_port_available(port: int) -> bool:
+        if port < 1 or port > 65535:
+            return False
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
+
+    def _get_running_docker_published_ports(self) -> set[int]:
+        code, out, _ = self._run(["docker", "ps", "--format", "{{.Ports}}"])
+        if code != 0 or not out:
+            return set()
+
+        ports: set[int] = set()
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            # Ejemplos:
+            # 0.0.0.0:8181->80/tcp, :::8181->80/tcp
+            # [::]:8181->80/tcp
+            for match in re.finditer(r":(\d+)->", line):
+                try:
+                    ports.add(int(match.group(1)))
+                except ValueError:
+                    continue
+        return ports
+
+    def _validate_setup_ports_inputs(
+        self,
+        http_port: str,
+        https_port: str,
+        db_port: str,
+        pma_port: str,
+    ) -> tuple[bool, str]:
+        raw_map = {
+            "HTTP": http_port.strip(),
+            "HTTPS": https_port.strip(),
+            "MariaDB": db_port.strip(),
+            "phpMyAdmin": pma_port.strip(),
+        }
+
+        parsed: dict[str, int] = {}
+        for label, raw in raw_map.items():
+            if not raw:
+                return False, f"Completa el puerto {label}."
+            try:
+                value = int(raw)
+            except ValueError:
+                return False, f"El puerto {label} debe ser numerico."
+            if value < 1 or value > 65535:
+                return False, f"El puerto {label} debe estar entre 1 y 65535."
+            parsed[label] = value
+
+        values = list(parsed.values())
+        if len(set(values)) != len(values):
+            return False, "No se permiten puertos repetidos."
+
+        docker_ports = self._get_running_docker_published_ports()
+        busy_labels: list[str] = []
+        for label, port in parsed.items():
+            # En remoto validamos contra puertos publicados del daemon remoto.
+            # En local tambien validamos disponibilidad en host cliente.
+            is_busy = port in docker_ports
+            if not is_busy and self.docker_mode != "remote":
+                is_busy = not self._is_host_port_available(port)
+            if is_busy:
+                busy_labels.append(label)
+        if busy_labels:
+            prefix = "Puertos en uso en daemon remoto: " if self.docker_mode == "remote" else "Puertos en uso: "
+            return False, prefix + ", ".join(busy_labels)
+
+        return True, "Puertos validados y disponibles."
+
+    def _add_password_entry_with_toggle(
+        self,
+        parent: tk.Misc,
+        textvariable: tk.StringVar,
+        row: int,
+        column: int,
+        padx: int | tuple[int, int] = 0,
+        pady: int | tuple[int, int] = 0,
+        sticky: str = "ew",
+    ) -> ttk.Entry:
+        wrapper = ttk.Frame(parent)
+        wrapper.grid(row=row, column=column, sticky=sticky, padx=padx, pady=pady)
+        wrapper.columnconfigure(0, weight=1)
+
+        entry = ttk.Entry(wrapper, textvariable=textvariable, show="*")
+        entry.grid(row=0, column=0, sticky="ew")
+
+        toggle_button = ttk.Button(wrapper, text="Ver", width=7)
+        toggle_button.grid(row=0, column=1, padx=(6, 0))
+
+        def toggle_password_visibility() -> None:
+            hidden = entry.cget("show") == "*"
+            entry.configure(show="" if hidden else "*")
+            toggle_button.configure(text="Ocultar" if hidden else "Ver")
+
+        toggle_button.configure(command=toggle_password_visibility)
+        return entry
+
+    def _open_or_focus_work_tab(self, tab_key: str, title: str) -> ttk.Frame | None:
+        if self.tabs is None:
+            return None
+
+        existing = self.dynamic_tabs.get(tab_key)
+        if existing is not None and existing.winfo_exists():
+            self.tabs.select(existing)
+            return existing
+
+        frame = ttk.Frame(self.tabs, padding=10)
+        self.dynamic_tabs[tab_key] = frame
+        self.tabs.add(frame, text=title)
+        self.tabs.select(frame)
+        return frame
+
+    def _close_work_tab(self, tab_key: str) -> None:
+        if self.tabs is None:
+            return
+        tab = self.dynamic_tabs.get(tab_key)
+        if tab is None or not tab.winfo_exists():
+            self.dynamic_tabs.pop(tab_key, None)
+            return
+        try:
+            self.tabs.forget(tab)
+        except Exception:
+            pass
+        tab.destroy()
+        self.dynamic_tabs.pop(tab_key, None)
+
+    def _update_status_dot(self, *_: object) -> None:
+        if self.docker_status_dot is None or not self.docker_status_dot.winfo_exists():
+            return
+        status = self.status_var.get().lower()
+        if "disponible" in status and "no " not in status:
+            color = "#10b981"   # green  - available
+        elif "no disponible" in status or "no encontrado" in status or "error" in status:
+            color = "#ef4444"   # red    - unavailable
+        elif "iniciando" in status or "comprobando" in status:
+            color = "#f59e0b"   # amber  - in progress
+        else:
+            color = "#64748b"   # slate  - unknown
+        self.docker_status_dot.configure(fg=color)
+        self._update_connection_mode_badge()
+
+    def _update_connection_mode_badge(self) -> None:
+        host = (self.docker_host or "").strip()
+        if host.startswith("tcp://"):
+            host = host[6:]
+        elif host.startswith("http://"):
+            host = host[7:]
+        elif host.startswith("https://"):
+            host = host[8:]
+
+        if self.docker_mode == "remote":
+            short_host = host if len(host) <= 34 else f"{host[:31]}..."
+            if self.is_compact_layout:
+                mode_text = f"Remoto: {short_host or 'sin host'}"
+            else:
+                mode_text = f"Modo: remoto ({short_host or 'sin host'})"
+            fg = "#7f1d1d"
+            bg = "#fee2e2"
+        else:
+            mode_text = "Local" if self.is_compact_layout else "Modo: local"
+            fg = "#1e3a8a"
+            bg = "#dbeafe"
+
+        self.connection_mode_var.set(mode_text)
+        if self.connection_mode_badge is not None and self.connection_mode_badge.winfo_exists():
+            self.connection_mode_badge.configure(fg=fg, bg=bg)
+
+    def _bind_global_shortcuts(self) -> None:
+        def bind_shortcut(sequence: str, action: Callable[[], None]) -> None:
+            def handler(_event: object) -> str:
+                try:
+                    action()
+                except Exception:
+                    pass
+                return "break"
+
+            self.root.bind_all(sequence, handler)
+
+        bind_shortcut("<Control-r>", self.refresh_everything)
+        bind_shortcut("<Control-i>", self.open_import_wizard)
+        bind_shortcut("<Control-e>", self.open_export_wizard)
+        bind_shortcut("<Control-l>", self.open_setup_wizard)
+        bind_shortcut("<Control-b>", self._toggle_compact_layout)
+        bind_shortcut("<Control-q>", self.on_close)
+
+    def _schedule_layout_reflow(self, event: tk.Event) -> None:
+        if event.widget is not self.root:
+            return
+        if self._layout_reflow_job is not None:
+            try:
+                self.root.after_cancel(self._layout_reflow_job)
+            except Exception:
+                pass
+        self._layout_reflow_job = self.root.after(90, self._apply_responsive_layout)
+
+    def _apply_responsive_layout(self) -> None:
+        self._layout_reflow_job = None
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        compact = width < 1040 or height < 620
+        self._set_compact_layout(compact)
+
+    def _toggle_compact_layout(self) -> None:
+        self._set_compact_layout(not self.is_compact_layout)
+
+    def _set_compact_layout(self, compact: bool) -> None:
+        if self.is_compact_layout == compact:
+            return
+        self.is_compact_layout = compact
+
+        if self.sidebar_frame is not None and self.sidebar_frame.winfo_exists():
+            self.sidebar_frame.configure(width=84 if compact else 234)
+
+        if self.sidebar_logo_title_label is not None and self.sidebar_logo_title_label.winfo_exists():
+            self.sidebar_logo_title_label.configure(text="\u2726" if compact else "\u2726  Shopify")
+
+        if self.sidebar_logo_subtitle_label is not None and self.sidebar_logo_subtitle_label.winfo_exists():
+            if compact:
+                self.sidebar_logo_subtitle_label.pack_forget()
+            else:
+                if not self.sidebar_logo_subtitle_label.winfo_manager():
+                    self.sidebar_logo_subtitle_label.pack(anchor="w", pady=(3, 0))
+
+        if self.sidebar_shortcuts_label is not None and self.sidebar_shortcuts_label.winfo_exists():
+            if compact:
+                self.sidebar_shortcuts_label.pack_forget()
+            else:
+                if not self.sidebar_shortcuts_label.winfo_manager():
+                    self.sidebar_shortcuts_label.pack(fill="x")
+
+        for btn, full_label, compact_label in self.sidebar_nav_buttons:
+            if not btn.winfo_exists():
+                continue
+            if compact:
+                btn.configure(text=compact_label, anchor="center", padx=0)
+            else:
+                btn.configure(text=full_label, anchor="w", padx=18)
+
+        if self.sidebar_quit_button is not None and self.sidebar_quit_button.winfo_exists():
+            if compact:
+                self.sidebar_quit_button.configure(text="\u00d7", anchor="center", padx=0)
+            else:
+                self.sidebar_quit_button.configure(text="\u00d7  Cerrar aplicacion", anchor="w", padx=18)
+
+        if self.sidebar_status_label is not None and self.sidebar_status_label.winfo_exists():
+            if compact:
+                self.sidebar_status_label.pack_forget()
+            else:
+                if not self.sidebar_status_label.winfo_manager():
+                    self.sidebar_status_label.pack(side="left", padx=(6, 0))
+
+        style = ttk.Style(self.root)
+        if compact:
+            style.configure("TNotebook.Tab", padding=(10, 6), font=("Segoe UI", 9))
+        else:
+            style.configure("TNotebook.Tab", padding=(16, 9), font=("Segoe UI", 10))
+
+        self._update_connection_mode_badge()
+
+    def _add_work_tab_header(self, parent: ttk.Frame, title: str, tab_key: str) -> None:
+        header = tk.Frame(parent, bg="#eff6ff", padx=16, pady=10)
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 14))
+        tk.Label(header, text=title, font=("Segoe UI Semibold", 12),
+                 fg="#1e40af", bg="#eff6ff").pack(side="left")
+        ttk.Button(header, text="Cerrar ×", command=lambda: self._close_work_tab(tab_key),
+                   style="Ghost.TButton").pack(side="right")
+
+    def open_setup_wizard(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        default_ip_red = "192.168.200.51"
+        if self.docker_mode == "remote" and self.docker_host:
+            parsed = self._extract_host_port_from_docker_host(self.docker_host)
+            if parsed is not None:
+                host, _port = parsed
+                if host:
+                    default_ip_red = host
+
+        window = self._open_or_focus_work_tab("setup", "Crear/Recrear")
+        if window is None:
+            messagebox.showerror("Interfaz", "No se pudo abrir la pestaña de Crear/Recrear.")
+            return
+
+        for child in window.winfo_children():
+            child.destroy()
+
+        outer = self._create_scrollable_surface(window, padding=(8, 8))
+        outer.columnconfigure(1, weight=1)
+        self._add_work_tab_header(outer, "Asistente Crear/Recrear entorno Shopify", "setup")
+
+        shopify_name_var = tk.StringVar(value="shopify-dev1")
+        network_var = tk.StringVar(value="shopify-network1")
+        shopify_volume_var = tk.StringVar(value="shopifydata1")
+        dev_port_var = tk.StringVar(value="9292")
+        theme_port_var = tk.StringVar(value="3000")
+        codeserver_port_var = tk.StringVar(value="8080")
+        ssh_port_var = tk.StringVar(value="2222")
+        ip_red_var = tk.StringVar(value=default_ip_red)
+        store_url_var = tk.StringVar(value="tu-tienda.myshopify.com")
+        # shopify_token_var eliminado, no se usará access token
+        theme_name_var = tk.StringVar(value="mi-tema")
+        store_password_var = tk.StringVar(value="")
+        node_image_var = tk.StringVar(value="node:18-alpine")
+        auto_pull_var = tk.BooleanVar(value=True)
+        status_var = tk.StringVar(value="Completa la configuracion y pulsa Crear/Recrear.")
+        progress_var = tk.DoubleVar(value=0)
+        stop_event = threading.Event()
+
+        row = 1
+        # Asegurarse de que row esté correctamente incrementado antes de usarlo para el checkbox
+        row += 1
+        ttk.Label(outer, text="Contenedor Shopify CLI:").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(outer, textvariable=shopify_name_var).grid(row=row, column=1, sticky="ew", pady=4)
+
+        row += 1
+        ttk.Label(outer, text="Network Docker:").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(outer, textvariable=network_var).grid(row=row, column=1, sticky="ew", pady=4)
+
+        row += 1
+        ttk.Label(outer, text="Volumen datos Shopify:").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(outer, textvariable=shopify_volume_var).grid(row=row, column=1, sticky="ew", pady=4)
+
+        row += 1
+        ttk.Label(outer, text="Imagen Node.js:").grid(row=row, column=0, sticky="w", pady=4)
+        node_combo = ttk.Combobox(outer, textvariable=node_image_var,
+            values=["node:18-alpine", "node:20-alpine", "node:18", "node:20"], state="normal")
+        node_combo.grid(row=row, column=1, sticky="ew", pady=4)
+
+        ports_frame = ttk.LabelFrame(outer, text="Puertos host")
+        row += 1
+        ports_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        for i in range(4):
+            ports_frame.columnconfigure(i, weight=1)
+
+        ttk.Label(ports_frame, text="Dev server (Shopify CLI)").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(ports_frame, textvariable=dev_port_var, width=8).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(ports_frame, text="Theme Preview").grid(row=0, column=2, sticky="w", padx=6)
+        ttk.Entry(ports_frame, textvariable=theme_port_var, width=8).grid(row=0, column=3, sticky="w", padx=6)
+        ttk.Label(ports_frame, text="code-server (VS Code web)").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(ports_frame, textvariable=codeserver_port_var, width=8).grid(row=1, column=1, sticky="w", padx=6)
+        ttk.Label(ports_frame, text="Puerto para editar código\ndesde el navegador o VS Code app", foreground="#555").grid(row=1, column=2, columnspan=2, sticky="w", padx=6)
+        ttk.Label(ports_frame, text="SSH (Remote-SSH de VS Code)").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(ports_frame, textvariable=ssh_port_var, width=8).grid(row=2, column=1, sticky="w", padx=6)
+        ttk.Label(ports_frame, text="Puerto SSH para conectar VS Code\ndirectamente al contenedor", foreground="#555").grid(row=2, column=2, columnspan=2, sticky="w", padx=6)
+
+        row += 1
+        ttk.Label(outer, text="IP en red local:").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(outer, textvariable=ip_red_var).grid(row=row, column=1, sticky="ew", pady=4)
+
+        shopify_frame = ttk.LabelFrame(outer, text="Configuracion Shopify")
+        row += 1
+        shopify_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        shopify_frame.columnconfigure(1, weight=1)
+        shopify_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(shopify_frame, text="URL de la tienda").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(shopify_frame, textvariable=store_url_var).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6)
+        ttk.Label(shopify_frame, text="Nombre del tema").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(shopify_frame, textvariable=theme_name_var).grid(row=1, column=1, sticky="ew", padx=6)
+
+        ttk.Label(shopify_frame, text="Contrasena de la tienda").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        self._add_password_entry_with_toggle(shopify_frame, store_password_var, row=2, column=1, padx=6)
+        def _open_password_help() -> None:
+            import webbrowser
+            import urllib.parse as _up
+            url = f"https://{store_url_var.get().strip()}/admin/online_store/preferences"
+            webbrowser.open(url)
+        ttk.Button(
+            shopify_frame, text="? Donde esta",
+            command=_open_password_help,
+            style="Ghost.TButton",
+        ).grid(row=2, column=2, padx=6, pady=6)
+        ttk.Label(
+            shopify_frame,
+            text="Admin Shopify > Configuracion > Tienda online > Preferencias > Proteccion con contrasena",
+            style="Muted.TLabel",
+            wraplength=420,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
+
+        info_frame = ttk.LabelFrame(outer, text="Informacion")
+        row += 1
+        info_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        ttk.Label(
+            info_frame,
+            text=(
+                "Se creara un contenedor Docker con Node.js y Shopify CLI listo para desarrollo.\n"
+                "La URL de la tienda tiene el formato: mi-tienda.myshopify.com (sin https://)."
+            ),
+            wraplength=560,
+            justify="left",
+            style="Muted.TLabel",
+        ).pack(padx=8, pady=6, anchor="w")
+
+        row += 1
+        ttk.Separator(outer, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 10))
+
+        row += 1
+        ttk.Label(outer, textvariable=status_var).grid(row=row, column=0, columnspan=2, sticky="w")
+
+        row += 1
+        ttk.Progressbar(outer, orient="horizontal", mode="determinate", maximum=100, variable=progress_var).grid(
+            row=row,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(8, 0),
+        )
+
+        row += 1
+        actions = ttk.Frame(outer)
+        actions.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        cancel_button = ttk.Button(actions, text="Cancelar", command=window.destroy)
+        cancel_button.pack(side="right")
+        stop_button = ttk.Button(
+            actions,
+            text="Detener",
+            state="disabled",
+            command=lambda: self._request_import_cancel(status_var, stop_event, stop_button),
+        )
+        stop_button.pack(side="right", padx=(0, 8))
+        run_button = ttk.Button(
+            actions,
+            text="Crear/Recrear ahora",
+            command=lambda: self._run_setup_from_wizard(
+                window=window,
+                status_var=status_var,
+                progress_var=progress_var,
+                run_button=run_button,
+                cancel_button=cancel_button,
+                stop_button=stop_button,
+                stop_event=stop_event,
+                shopify_container=shopify_name_var.get().strip(),
+                network_name=network_var.get().strip(),
+                shopify_volume=shopify_volume_var.get().strip(),
+                dev_port=dev_port_var.get().strip(),
+                theme_port=theme_port_var.get().strip(),
+                codeserver_port=codeserver_port_var.get().strip(),
+                ssh_port=ssh_port_var.get().strip(),
+                ip_red=ip_red_var.get().strip(),
+                store_url=store_url_var.get().strip(),
+                # shopify_token eliminado
+                theme_name=theme_name_var.get().strip(),
+                node_image=node_image_var.get().strip(),
+                store_password=store_password_var.get(),
+                auto_pull=auto_pull_var.get(),
+            ),
+        )
+        run_button.pack(side="right", padx=(0, 8))
+
+        def refresh_ports_validation(*_args: object) -> None:
+            try:
+                dp = int(dev_port_var.get())
+                tp = int(theme_port_var.get())
+                cp = int(codeserver_port_var.get())
+                sp = int(ssh_port_var.get())
+                if len({dp, tp, cp, sp}) != 4:
+                    run_button.configure(state="disabled")
+                    status_var.set("Los puertos no pueden coincidir.")
+                    return
+                if not (1 <= dp <= 65535 and 1 <= tp <= 65535 and 1 <= cp <= 65535 and 1 <= sp <= 65535):
+                    run_button.configure(state="disabled")
+                    status_var.set("Puertos fuera de rango (1-65535).")
+                    return
+                run_button.configure(state="normal")
+                status_var.set("Completa la configuracion y pulsa Crear/Recrear.")
+            except ValueError:
+                run_button.configure(state="disabled")
+                status_var.set("Los puertos deben ser numeros enteros.")
+
+        for var in (dev_port_var, theme_port_var, codeserver_port_var, ssh_port_var):
+            var.trace_add("write", refresh_ports_validation)
+        refresh_ports_validation()
+
+    def _run_setup_from_wizard(
+        self,
+        window: tk.Toplevel,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        run_button: ttk.Button,
+        cancel_button: ttk.Button,
+        stop_button: ttk.Button,
+        stop_event: threading.Event,
+        shopify_container: str,
+        network_name: str,
+        shopify_volume: str,
+        dev_port: str,
+        theme_port: str,
+        codeserver_port: str,
+        ssh_port: str,
+        ip_red: str,
+        store_url: str,
+        theme_name: str,
+        node_image: str,
+        store_password: str,
+        auto_pull: bool,
+    ) -> None:
+        required_fields = [
+            (shopify_container, "Contenedor Shopify CLI"),
+            (network_name, "Network Docker"),
+            (shopify_volume, "Volumen datos Shopify"),
+            (dev_port, "Puerto Dev server"),
+            (theme_port, "Puerto Theme Preview"),
+            (codeserver_port, "Puerto code-server"),
+            (ssh_port, "Puerto SSH"),
+            (store_url, "URL de la tienda"),
+            (node_image, "Imagen Node.js"),
+        ]
+        for value, label in required_fields:
+            if not value:
+                messagebox.showwarning("Crear/Recrear", f"El campo '{label}' es obligatorio.")
+                return
+
+        try:
+            dev_port_i = int(dev_port)
+            theme_port_i = int(theme_port)
+            codeserver_port_i = int(codeserver_port)
+            ssh_port_i = int(ssh_port)
+        except ValueError:
+            messagebox.showwarning("Crear/Recrear", "Los puertos deben ser numeros enteros.")
+            return
+
+        ports = [dev_port_i, theme_port_i, codeserver_port_i, ssh_port_i]
+        if len(set(ports)) != len(ports):
+            messagebox.showwarning("Crear/Recrear", "Los puertos no pueden repetirse.")
+            return
+
+        if self.docker_mode == "remote":
+            remote_published = self._get_running_docker_published_ports()
+            busy_ports = [p for p in ports if p in remote_published]
+        else:
+            busy_ports = [p for p in ports if not self._is_host_port_available(p)]
+        if busy_ports:
+            messagebox.showwarning(
+                "Crear/Recrear",
+                (
+                    "Estos puertos ya estan publicados en el daemon remoto: "
+                    if self.docker_mode == "remote"
+                    else "Estos puertos estan en uso en el host: "
+                )
+                + ", ".join(str(p) for p in busy_ports),
+            )
+            return
+
+        existing_containers = [
+            cname
+            for cname in (shopify_container,)
+            if self._container_exists(cname)
+        ]
+
+        recreate_existing = True
+        if existing_containers:
+            existing_text = ", ".join(existing_containers)
+            delete_existing = messagebox.askyesno(
+                "Crear/Recrear",
+                (
+                    "Se detectaron contenedores ya creados:\n\n"
+                    f"{existing_text}\n\n"
+                    "Quieres borrarlos para crearlos de nuevo?"
+                ),
+            )
+            if not delete_existing:
+                continue_without_delete = messagebox.askyesno(
+                    "Crear/Recrear",
+                    (
+                        "No se borraran los contenedores existentes.\n\n"
+                        "Quieres avanzar con el resto del proceso?\n\n"
+                        "Si eliges No, se cancelara la operacion."
+                    ),
+                )
+                if not continue_without_delete:
+                    return
+                recreate_existing = False
+
+        if recreate_existing:
+            warning = (
+                "Esta accion destruira el entorno anterior con los mismos nombres.\n\n"
+                f"Contenedor: {shopify_container}\n"
+                f"Volumen: {shopify_volume}\n"
+                f"Network: {network_name}\n\n"
+                "Deseas continuar?"
+            )
+        else:
+            warning = (
+                "Se conservaran los contenedores existentes y se intentara crear lo que falte.\n\n"
+                f"Contenedor objetivo: {shopify_container}\n"
+                f"Volumen objetivo: {shopify_volume}\n"
+                f"Network objetivo: {network_name}\n\n"
+                "Deseas continuar?"
+            )
+        if not messagebox.askyesno("Confirmar Crear/Recrear", warning):
+            return
+
+        run_button.configure(state="disabled")
+        cancel_button.configure(state="disabled")
+        stop_button.configure(state="normal")
+        stop_event.clear()
+        progress_var.set(0)
+        status_var.set("Iniciando creacion del entorno Shopify...")
+
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        worker = threading.Thread(
+            target=self._run_setup_worker,
+            args=(
+                events,
+                stop_event,
+                shopify_container,
+                network_name,
+                shopify_volume,
+                dev_port_i,
+                theme_port_i,
+                codeserver_port_i,
+                ssh_port_i,
+                ip_red,
+                store_url,
+                # shopify_token eliminado
+                theme_name,
+                node_image,
+                recreate_existing,
+                auto_pull,
+                store_password,
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+        self._poll_setup_worker_queue(
+            window=window,
+            status_var=status_var,
+            progress_var=progress_var,
+            run_button=run_button,
+            cancel_button=cancel_button,
+            stop_button=stop_button,
+            events=events,
+            shopify_container=shopify_container,
+            dev_port=dev_port_i,
+            theme_port=theme_port_i,
+            codeserver_port=codeserver_port_i,
+            ssh_port=ssh_port_i,
+            ip_red=ip_red,
+            store_url=store_url,
+        )
+
+    def _run_setup_worker(
+        self,
+        events: queue.Queue[tuple[str, object]],
+        stop_event: threading.Event,
+        shopify_container: str,
+        network_name: str,
+        shopify_volume: str,
+        dev_port: int,
+        theme_port: int,
+        codeserver_port: int,
+        ssh_port: int,
+        ip_red: str,
+        store_url: str,
+        # shopify_token eliminado
+        theme_name: str,
+        node_image: str,
+        recreate_existing: bool,
+        auto_pull: bool = True,
+        store_password: str = "",
+    ) -> None:
+        try:
+            def check_cancel() -> None:
+                if stop_event.is_set():
+                    raise RuntimeError("SETUP_CANCELLED_BY_USER")
+
+            def run_checked(args: list[str], error_message: str) -> None:
+                code, _out, err = self._run(args)
+                if code != 0:
+                    raise RuntimeError(err or error_message)
+
+            if recreate_existing:
+                events.put(("progress", (8.0, "[1/5] Limpiando instalacion anterior...")))
+                if self._container_exists(shopify_container):
+                    run_checked(["docker", "rm", "-f", shopify_container],
+                                f"No se pudo eliminar contenedor {shopify_container}")
+                self._run(["docker", "volume", "rm", shopify_volume])
+                self._run(["docker", "network", "rm", network_name])
+            else:
+                events.put(("progress", (8.0, "[1/5] Revisando recursos existentes (sin borrar)...")))
+
+            check_cancel()
+            events.put(("progress", (22.0, "[2/5] Creando network y volumen...")))
+            if recreate_existing or not self._network_exists(network_name):
+                run_checked(["docker", "network", "create", network_name], "No se pudo crear la network")
+            if recreate_existing or not self._volume_exists(shopify_volume):
+                run_checked(["docker", "volume", "create", shopify_volume], "No se pudo crear volumen Shopify")
+
+            check_cancel()
+            events.put(("progress", (30.0, "[3/5] Comprobando imagen Docker...")))
+
+            # Comprobar si la imagen ya existe localmente
+            code_img, out_img, _ = self._run(["docker", "image", "inspect", node_image, "--format", "{{.Id}}"])
+            image_present = (code_img == 0 and out_img.strip() != "")
+
+            if not image_present:
+                events.put(("progress", (32.0, f"[3/5] Descargando imagen {node_image} (puede tardar varios minutos)...")))
+
+                # docker pull en hilo separado para poder reportar progreso animado
+                pull_result: list[tuple[int, str, str]] = []
+                pull_done = threading.Event()
+
+                def _do_pull() -> None:
+                    r = self._run(["docker", "pull", node_image])
+                    pull_result.append(r)
+                    pull_done.set()
+
+                pull_thread = threading.Thread(target=_do_pull, daemon=True)
+                pull_thread.start()
+
+                pull_tick = 0
+                while not pull_done.is_set():
+                    if stop_event.is_set():
+                        raise RuntimeError("SETUP_CANCELLED_BY_USER")
+                    pull_done.wait(timeout=2.0)
+                    pull_tick += 1
+                    # Progreso animado entre 32% y 58% mientras descarga
+                    animated_pct = 32.0 + min(26.0, pull_tick * 0.8)
+                    events.put(("progress", (animated_pct, f"[3/5] Descargando imagen {node_image}... ({pull_tick * 2}s)")))
+
+                pull_code, _, pull_err = pull_result[0] if pull_result else (1, "", "Pull no completado")
+                if pull_code != 0:
+                    raise RuntimeError(
+                        f"No se pudo descargar la imagen '{node_image}'.\n\n"
+                        f"{pull_err or 'Comprueba el nombre de la imagen y tu conexion a internet.'}"
+                    )
+                events.put(("progress", (60.0, f"[3/5] Imagen {node_image} descargada correctamente.")))
+            else:
+                events.put(("progress", (60.0, f"[3/5] Imagen {node_image} ya disponible localmente.")))
+
+            check_cancel()
+            events.put(("progress", (62.0, "[3/5] Arrancando contenedor Node.js con Shopify CLI...")))
+            if recreate_existing or not self._container_exists(shopify_container):
+                # No usar access token nunca
+
+                _store = store_url or "tu-tienda.myshopify.com"
+
+                # Generar el entrypoint.sh como string Python limpio
+                # Se copiara al contenedor via docker cp para evitar problemas
+                # de escapado de comillas con printf/sh -c
+                entrypoint_lines = [
+                    "#!/bin/sh",
+                    "# Entrypoint generado por Shopify Utilidades",
+                    "unset SHOPIFY_CLI_THEME_TOKEN",
+                    "unset SHOPIFY_ACCESS_TOKEN",
+                    "unset SHOPIFY_FLAG_STORE",
+                    "unset SHOPIFY_THEME_NAME",
+                    f"STORE={_store}",
+                    f"STORE_PASSWORD={store_password}",
+                    f"THEME_NAME={theme_name or 'Horizon'}",
+                    "THEME_DIR=/app/horizon",
+                    "FLAG_INSTALLED=/app/.shopify_cli_installed",
+                    "",
+                    "# Instalacion (solo primera vez)",
+                    "if [ ! -f \"$FLAG_INSTALLED\" ]; then",
+                    "  echo '[entrypoint] Primera vez: instalando dependencias...'",
+                    "  apk add --no-cache xdg-utils git curl libstdc++ openssh openssh-server 2>/dev/null || true",
+                    "  # Configurar SSH server",
+                    "  echo '[entrypoint] Configurando openssh-server...'",
+                    "  ssh-keygen -A 2>/dev/null || true",
+                    "  mkdir -p /root/.ssh && chmod 700 /root/.ssh",
+                    "  touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys",
+                    "  # Permitir login root por clave (sin contraseña)",
+                    "  sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true",
+                    "  sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true",
+                    "  sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config 2>/dev/null || true",
+                    "  sed -i 's/.*AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config 2>/dev/null || true",
+                    "  echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config",
+                    "  echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config",
+                    "  echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config",
+                    "  echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config",
+                    "  npm install -g @shopify/cli@latest @shopify/theme@latest",
+                    "  mkdir -p \"$THEME_DIR\"",
+                    "  # Instalar code-server para acceso remoto sin contraseña desde VS Code o navegador",
+                    "  echo '[entrypoint] Instalando code-server...'",
+                    "  curl -fsSL https://code-server.dev/install.sh | sh -s -- --method standalone --prefix /usr/local 2>/dev/null \\",
+                    "    || npm install -g code-server 2>/dev/null \\",
+                    "    || echo '[entrypoint] Aviso: no se pudo instalar code-server.'",
+                    "  touch \"$FLAG_INSTALLED\"",
+                    "  echo '[entrypoint] Instalacion completada.'",
+                    "fi",
+                    "",
+                    "# Arrancar sshd en segundo plano (puerto 22 interno)",
+                    "if command -v sshd >/dev/null 2>&1; then",
+                    "  echo '[entrypoint] Arrancando sshd...'",
+                    "  /usr/sbin/sshd 2>/dev/null || sshd 2>/dev/null || true",
+                    "fi",
+                    "",
+                    "# Arrancar code-server en segundo plano (sin auth, puerto 8080)",
+                    "if command -v code-server >/dev/null 2>&1; then",
+                    "  echo '[entrypoint] Arrancando code-server en puerto 8080 (sin contraseña)...'",
+                    "  code-server --bind-addr 0.0.0.0:8080 --auth none /app/horizon \\",
+                    "    >> /tmp/code-server.log 2>&1 &",
+                    "  echo '[entrypoint] code-server arrancado. URL: http://0.0.0.0:8080'",
+                    "else",
+                    "  echo '[entrypoint] code-server no disponible, saltando.'",
+                    "fi",
+                    "",
+                    "# Descarga automatica del tema si no existe todavia",
+                    "LIQUID_COUNT=$(find \"$THEME_DIR\" -name '*.liquid' 2>/dev/null | wc -l)",
+                    "if [ \"$LIQUID_COUNT\" -eq 0 ] && [ -f /tmp/shopify_auth_ok ]; then",
+                    "  echo '[entrypoint] Descargando tema' \"$THEME_NAME\" '...'",
+                    "  cd \"$THEME_DIR\"",
+                    "  shopify theme pull --store \"$STORE\" --theme \"$THEME_NAME\" --force 2>/dev/null || \\",
+                    "  shopify theme pull --store \"$STORE\" --force 2>/dev/null || true",
+                    "  echo '[entrypoint] Descarga completada.'",
+                    "fi",
+                    "",
+                    "# Arranque del dev server en bucle",
+                    "while true; do",
+                    "  LIQUID_COUNT=$(find \"$THEME_DIR\" -name '*.liquid' 2>/dev/null | wc -l)",
+                    "  if [ \"$LIQUID_COUNT\" -gt 0 ]; then",
+                    "    echo '[entrypoint] Tema encontrado:' \"$THEME_NAME\" '- Arrancando dev server...'",
+                    "    cd \"$THEME_DIR\"",
+                    "    shopify theme dev --store \"$STORE\" --host 0.0.0.0 --store-password \"$STORE_PASSWORD\" || true",
+                    "    echo '[entrypoint] Dev server detenido. Reiniciando en 5s...'",
+                    "    sleep 5",
+                    "  else",
+                    "    echo '[entrypoint] Esperando tema' \"$THEME_NAME\" 'en' \"$THEME_DIR\"",
+                    "    sleep 10",
+                    "  fi",
+                    "done",
+                ]
+                entrypoint_content = "\n".join(entrypoint_lines) + "\n"
+
+                # Escribir el entrypoint en un archivo temporal local
+                # y copiarlo al contenedor via docker cp (sin problemas de escapado)
+                import tempfile as _tmpmod
+                _fd, _tmp_ep = _tmpmod.mkstemp(prefix="shu_ep_", suffix=".sh")
+                try:
+                    with os.fdopen(_fd, "w", encoding="utf-8", newline="\n") as _fh:
+                        _fh.write(entrypoint_content)
+                except Exception:
+                    try:
+                        os.close(_fd)
+                    except OSError:
+                        pass
+                    _tmp_ep = ""
+
+                # El contenedor arranca con un loop simple que espera
+                # al entrypoint.sh real (que se copiara justo despues via docker cp)
+                startup_script = (
+                    "mkdir -p /app/horizon && "
+                    "while [ ! -f /app/entrypoint.sh ]; do sleep 1; done && "
+                    "chmod +x /app/entrypoint.sh && "
+                    "sh /app/entrypoint.sh"
+                )
+
+                # Solo pasar variables de entorno compatibles con el CLI (solo shpat_)
+                env_args: list[str] = ["-e", "NODE_ENV=development"]
+                if store_url:
+                    env_args += ["-e", f"SHOPIFY_STORE={store_url}"]
+                # Nunca pasar access token como variable de entorno (eliminado)
+                # Si existía código que añadía -e SHOPIFY_CLI_THEME_TOKEN o -e SHOPIFY_ACCESS_TOKEN, ya no se añade nada
+                if theme_name:
+                    env_args += ["-e", f"SHOPIFY_THEME_NAME={theme_name}"]
+
+                run_cmd = (
+                    ["docker", "run", "-d",
+                     "--name", shopify_container,
+                     "--network", network_name,
+                     "--restart", "unless-stopped",  # arranca solo al encender Docker
+                     "-v", f"{shopify_volume}:/app",
+                     "-w", "/app",
+                     "-p", f"{dev_port}:9292",
+                     "-p", f"{theme_port}:3000",
+                     "-p", f"{codeserver_port}:8080",  # code-server: edición remota sin contraseña
+                     "-p", f"{ssh_port}:22",            # SSH: Remote-SSH de VS Code
+                    ] + env_args + [
+                     node_image,
+                     "sh", "-c", startup_script,
+                    ]
+                )
+                run_checked(run_cmd, "No se pudo iniciar contenedor Shopify")
+
+                # Copiar el entrypoint.sh al contenedor via docker cp
+                if _tmp_ep and os.path.exists(_tmp_ep):
+                    try:
+                        cp_code, _, cp_err = self._run([
+                            "docker", "cp", _tmp_ep,
+                            f"{shopify_container}:/app/entrypoint.sh"
+                        ])
+                        if cp_code != 0:
+                            events.put(("debug", f"Aviso: no se pudo copiar entrypoint.sh: {cp_err}"))
+                    finally:
+                        try:
+                            os.remove(_tmp_ep)
+                        except OSError:
+                            pass
+
+            check_cancel()
+            events.put(("progress", (75.0, "[4/5] Esperando que Shopify CLI este listo...")))
+            # Wait up to 60s for shopify CLI installation
+            for attempt in range(24):
+                if stop_event.is_set():
+                    raise RuntimeError("SETUP_CANCELLED_BY_USER")
+                time.sleep(2.5)
+                code, out, _ = self._run([
+                    "docker", "exec", shopify_container,
+                    "sh", "-c", "shopify version 2>/dev/null || shopify theme version 2>/dev/null || echo 'installing'"
+                ])
+                if code == 0 and "installing" not in (out or "").lower():
+                    break
+                pct = 75.0 + (attempt / 24) * 17.0
+                events.put(("progress", (pct, f"[4/5] Instalando Shopify CLI... (intento {attempt+1}/24)")))
+
+            check_cancel()
+            events.put(("progress", (94.0, "[5/5] Configurando entorno y verificando Shopify CLI...")))
+            time.sleep(1.0)
+
+            # --- Paso 6 (opcional): Descarga automatica del tema ---
+            if auto_pull and store_url:
+                check_cancel()
+                events.put(("progress", (96.0, "[6/6] Descargando tema desde Shopify...")))
+
+                # Primero necesitamos autenticar. Lanzamos auth login dentro del contenedor
+                # y leemos los logs para capturar el codigo y URL de verificacion
+                events.put(("debug", "Iniciando autenticacion Shopify para descarga del tema..."))
+
+                # Lanzar auth en background y capturar su output via docker logs
+                auth_cmd = (
+                    "unset SHOPIFY_CLI_THEME_TOKEN SHOPIFY_ACCESS_TOKEN SHOPIFY_FLAG_STORE SHOPIFY_THEME_NAME; "  # Mantener unset por limpieza, pero nunca se setean
+                    "shopify auth login > /tmp/shopify_auth.log 2>&1 &"
+                )
+                self._run(["docker", "exec", shopify_container, "sh", "-c", auth_cmd])
+
+                # Esperar hasta que aparezca el codigo de verificacion en el log
+                auth_url = ""
+                auth_code = ""
+                for _ in range(30):
+                    if stop_event.is_set():
+                        raise RuntimeError("SETUP_CANCELLED_BY_USER")
+                    time.sleep(1.0)
+                    code_r, log_out, _ = self._run([
+                        "docker", "exec", shopify_container,
+                        "sh", "-c", "cat /tmp/shopify_auth.log 2>/dev/null"
+                    ])
+                    if "activate-with-code" in (log_out or ""):
+                        # Extraer URL y codigo
+                        import re as _re
+                        url_m = _re.search(r'(https://accounts\.shopify\.com/activate-with-code[^\s]+)', log_out)
+                        code_m = _re.search(r'verification code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})', log_out)
+                        if url_m:
+                            auth_url = url_m.group(1)
+                        if code_m:
+                            auth_code = code_m.group(1)
+                        break
+
+                if auth_url:
+                    events.put(("debug", f"Codigo: {auth_code}"))
+                    events.put(("debug", f"URL: {auth_url}"))
+                    auth_ack_event_setup = threading.Event()
+                    events.put(("auth_required", (auth_code, auth_url, auth_ack_event_setup)))
+
+                    # Esperar a que el usuario vea el diálogo antes de empezar a sondear login
+                    auth_ack_event_setup.wait(timeout=30.0)
+
+                    # Esperar hasta que el login complete (aparece 'Logged in' en el log)
+                    logged_in = False
+                    for _ in range(180):
+                        if stop_event.is_set():
+                            raise RuntimeError("SETUP_CANCELLED_BY_USER")
+                        time.sleep(1.0)
+                        _, log_out2, _ = self._run([
+                            "docker", "exec", shopify_container,
+                            "sh", "-c", "cat /tmp/shopify_auth.log 2>/dev/null"
+                        ])
+                        if any(m in (log_out2 or "") for m in ("Logged in", "logged in", "authenticated", "✔")):
+                            logged_in = True
+                            break
+
+                    if logged_in:
+                        events.put(("debug", "Autenticacion completada. Descargando tema..."))
+                        events.put(("progress", (97.0, f"[6/6] Autenticado. Descargando tema '{theme_name}'...")))
+
+                        # Marcar auth como completada para que el entrypoint lo sepa
+                        self._run(["docker", "exec", shopify_container, "sh", "-c", "touch /tmp/shopify_auth_ok"])
+
+                        # Ahora hacer shopify theme pull usando el nombre de tema especificado
+                        _theme_flag = f"--theme \"{theme_name}\"" if theme_name else ""
+                        pull_cmd = (
+                            "unset SHOPIFY_CLI_THEME_TOKEN SHOPIFY_ACCESS_TOKEN SHOPIFY_FLAG_STORE SHOPIFY_THEME_NAME; "  # Mantener unset por limpieza
+                            f"cd /app/horizon && shopify theme pull --store {store_url} "
+                            f"{_theme_flag} --force > /tmp/shopify_pull.log 2>&1"
+                        )
+                        pull_tick = 0
+                        pull_done_evt = threading.Event()
+                        pull_result_ref: list[tuple[int, str, str]] = []
+
+                        def _do_pull_auto() -> None:
+                            r = self._run(["docker", "exec", shopify_container, "sh", "-c", pull_cmd])
+                            pull_result_ref.append(r)
+                            pull_done_evt.set()
+
+                        threading.Thread(target=_do_pull_auto, daemon=True).start()
+
+                        while not pull_done_evt.is_set():
+                            if stop_event.is_set():
+                                raise RuntimeError("SETUP_CANCELLED_BY_USER")
+                            pull_done_evt.wait(timeout=2.0)
+                            pull_tick += 1
+                            pct = 97.0 + min(2.0, pull_tick * 0.1)
+                            events.put(("progress", (pct, f"[6/6] Descargando tema... ({pull_tick * 2}s)")))
+
+                        pull_code, _, pull_err = pull_result_ref[0] if pull_result_ref else (1, "", "")
+                        if pull_code == 0:
+                            events.put(("debug", "Tema descargado correctamente en /app/horizon"))
+                        else:
+                            events.put(("debug", f"Aviso: pull retorno codigo {pull_code}: {pull_err}"))
+                    else:
+                        events.put(("debug", "Tiempo de espera de autenticacion agotado. Descarga manual necesaria."))
+                else:
+                    events.put(("debug", "No se pudo obtener URL de autenticacion. Descarga manual necesaria."))
+
+            events.put(("done", None))
+        except Exception as exc:
+            events.put(("debug", f"ERROR en worker: {exc}"))
+            events.put(("error", str(exc)))
+
+    def _poll_setup_worker_queue(
+        self,
+        window: tk.Toplevel,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        run_button: ttk.Button,
+        cancel_button: ttk.Button,
+        stop_button: ttk.Button,
+        events: queue.Queue[tuple[str, object]],
+        shopify_container: str,
+        dev_port: int,
+        theme_port: int,
+        codeserver_port: int,
+        ssh_port: int,
+        ip_red: str,
+        store_url: str,
+    ) -> None:
+        if not window.winfo_exists():
+            return
+
+        completed = False
+        failed: str | None = None
+
+        while True:
+            try:
+                kind, payload = events.get_nowait()
+            except queue.Empty:
+                break
+
+            if kind == "progress":
+                value, text = payload  # type: ignore[misc]
+                progress_var.set(float(value))
+                status_var.set(str(text))
+            elif kind == "auth_required":
+                auth_code, auth_url, auth_ack_event = payload  # type: ignore[misc]
+                status_var.set(f"Abre el navegador y confirma el codigo: {auth_code}")
+                # Abrir popup con instrucciones y boton para copiar URL
+                auth_dlg = tk.Toplevel(self.root)
+                auth_dlg.title("Autenticacion Shopify requerida")
+                auth_dlg.geometry("520x300")
+                auth_dlg.resizable(False, False)
+                auth_dlg.grab_set()
+                auth_dlg.configure(bg="#f1f5f9")
+                tk.Label(auth_dlg, text="Autenticacion con Shopify", font=("Segoe UI Semibold", 13),
+                         bg="#f1f5f9", fg="#0f766e").pack(pady=(18, 4))
+                tk.Label(auth_dlg, text=f"Codigo de verificacion:  {auth_code}",
+                         font=("Segoe UI Semibold", 12), bg="#f1f5f9", fg="#0b2a3f").pack(pady=(4, 8))
+                tk.Label(auth_dlg,
+                         text="1. Pulsa 'Abrir en navegador' o copia la URL\n"
+                              "2. Inicia sesion con tu cuenta Shopify\n"
+                              "3. Confirma el codigo mostrado arriba\n"
+                              "4. Pulsa 'Continuar' — el tema se descargara automaticamente",
+                         font=("Segoe UI", 10), bg="#f1f5f9", fg="#365066",
+                         justify="left").pack(padx=20, pady=(0, 10))
+                url_var = tk.StringVar(value=auth_url)
+                url_entry = ttk.Entry(auth_dlg, textvariable=url_var, width=60)
+                url_entry.pack(padx=20, pady=(0, 8))
+                btn_f = tk.Frame(auth_dlg, bg="#f1f5f9")
+                btn_f.pack()
+
+                def _open_browser(u: str = auth_url) -> None:
+                    import webbrowser
+                    webbrowser.open(u)
+
+                def _copy_url(u: str = auth_url) -> None:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(u)
+
+                def _continue_setup(ack: threading.Event = auth_ack_event) -> None:
+                    ack.set()
+                    auth_dlg.destroy()
+
+                ttk.Button(btn_f, text="Abrir en navegador", style="Accent.TButton",
+                           command=_open_browser).pack(side="left", padx=6)
+                ttk.Button(btn_f, text="Copiar URL", command=_copy_url).pack(side="left", padx=6)
+                ttk.Button(btn_f, text="Continuar", command=_continue_setup).pack(side="left", padx=6)
+                auth_dlg.protocol("WM_DELETE_WINDOW", _continue_setup)
+                auth_dlg.wait_window()
+            elif kind == "done":
+                completed = True
+            elif kind == "error":
+                failed = str(payload)
+
+        if completed:
+            stop_button.configure(state="disabled")
+            progress_var.set(100)
+            status_var.set("Entorno Shopify creado correctamente.")
+            self.log_event("SETUP", shopify_container, "OK", "Entorno Shopify recreado desde asistente GUI")
+            self.refresh_everything()
+            access_host = self._access_host_for_urls()
+            messagebox.showinfo(
+                "Crear/Recrear",
+                (
+                    "Entorno Shopify creado correctamente.\n\n"
+                    f"Dev server:      http://{access_host}:{dev_port}\n"
+                    f"Dev server red:  http://{ip_red}:{dev_port}\n"
+                    f"Editor código:   http://{access_host}:{codeserver_port}  ← code-server\n"
+                    f"Editor red:      http://{ip_red}:{codeserver_port}\n"
+                    f"SSH (VS Code):   {access_host}:{ssh_port}  ← Remote-SSH\n"
+                    f"Tienda: {store_url}\n"
+                    f"Contenedor: {shopify_container}\n\n"
+                    "El contenedor arranca SOLO al encender Docker.\n\n"
+                    "Para editar el código desde VS Code o navegador:\n"
+                    f"  → Pulsa 'Acceso Remoto (code-server)' o abre\n"
+                    f"    http://{ip_red}:{codeserver_port} en el navegador.\n\n"
+                    "UNICA VEZ — descargar el tema (si no lo has hecho):\n"
+                    f"  docker exec -it {shopify_container} sh\n"
+                    "  cd /app/horizon\n"
+                    f"  shopify theme pull --store {store_url}\n\n"
+                    "Tras descargar el tema, el dev server\n"
+                    "arrancara automaticamente en cada reinicio."
+                ),
+            )
+            ws_path = self._create_vscode_workspace(shopify_container=shopify_container)
+            # Mostrar diálogo SSH Remote-SSH (nuevo flujo)
+            self._show_vscode_ssh_setup_dialog(
+                shopify_container=shopify_container,
+                ssh_port=ssh_port,
+                ws_path=ws_path or "",
+            )
+            ask_import = messagebox.askyesno("Crear/Recrear", "Deseas importar un tema/backup ahora?")
+            self._close_work_tab("setup")
+            if ask_import:
+                self.open_import_wizard()
+            return
+
+        if failed is not None:
+            stop_button.configure(state="disabled")
+            run_button.configure(state="normal")
+            cancel_button.configure(state="normal")
+            if failed == "SETUP_CANCELLED_BY_USER":
+                status_var.set("Operacion cancelada por el usuario.")
+                messagebox.showinfo("Crear/Recrear", "Operacion cancelada por el usuario.")
+                return
+            self.log_event("SETUP", shopify_container or "global", "ERROR", failed)
+            self.refresh_history()
+            status_var.set(f"Error: {failed}")
+            messagebox.showerror("Crear/Recrear", f"No se pudo completar el entorno Shopify.\n\n{failed}")
+            return
+
+        window.after(
+            150,
+            lambda: self._poll_setup_worker_queue(
+                window=window,
+                status_var=status_var,
+                progress_var=progress_var,
+                run_button=run_button,
+                cancel_button=cancel_button,
+                stop_button=stop_button,
+                events=events,
+                shopify_container=shopify_container,
+                dev_port=dev_port,
+                theme_port=theme_port,
+                codeserver_port=codeserver_port,
+                ssh_port=ssh_port,
+                ip_red=ip_red,
+                store_url=store_url,
+            ),
+        )
+
+    def _list_containers_details(self) -> list[tuple[str, str, str]]:
+        code, out, _ = self._run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Image}}"])
+        if code != 0 or not out:
+            return []
+
+        result: list[tuple[str, str, str]] = []
+        for line in out.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) < 3:
+                continue
+            name = parts[0].strip()
+            status = parts[1].strip()
+            image = parts[2].strip()
+            if name:
+                result.append((name, status, image))
+        return result
+
+    def _is_container_running(self, container: str) -> bool:
+        code, out, _ = self._run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        return code == 0 and out.strip().lower() == "true"
+
+    def _container_exists(self, container_name: str) -> bool:
+        code, out, _ = self._run(["docker", "ps", "-a", "--format", "{{.Names}}"])
+        if code != 0 or not out:
+            return False
+        target = container_name.strip().lstrip("/").casefold()
+        return any(line.strip().lstrip("/").casefold() == target for line in out.splitlines())
+
+    def _network_exists(self, network_name: str) -> bool:
+        code, out, _ = self._run(["docker", "network", "ls", "--format", "{{.Name}}"])
+        if code != 0 or not out:
+            return False
+        target = network_name.strip().lstrip("/").casefold()
+        return any(line.strip().lstrip("/").casefold() == target for line in out.splitlines())
+
+    def _volume_exists(self, volume_name: str) -> bool:
+        code, out, _ = self._run(["docker", "volume", "ls", "--format", "{{.Name}}"])
+        if code != 0 or not out:
+            return False
+        target = volume_name.strip().lstrip("/").casefold()
+        return any(line.strip().lstrip("/").casefold() == target for line in out.splitlines())
+
+    @staticmethod
+    def _extract_host_port(port_output: str) -> str | None:
+        for line in port_output.splitlines():
+            match = re.search(r":(\d+)\s*$", line.strip())
+            if match:
+                return match.group(1)
+        return None
+
+    def _access_host_for_urls(self) -> str:
+        if self.docker_mode == "remote" and self.docker_host:
+            parsed = self._extract_host_port_from_docker_host(self.docker_host)
+            if parsed is not None:
+                host, _port = parsed
+                if ":" in host and not host.startswith("["):
+                    return f"[{host}]"
+                return host
+        return "localhost"
+
+    def _detect_shopify_local_url(self, shopify_container: str) -> str | None:
+        access_host = self._access_host_for_urls()
+        for internal_port in ("8080", "80"):
+            code, out, _ = self._run(["docker", "port", shopify_container, internal_port])
+            if code == 0 and out.strip():
+                port = self._extract_host_port(out)
+                if port:
+                    return f"http://{access_host}:{port}"
+
+        code, out, _ = self._run(["docker", "port", shopify_container])
+        if code == 0 and out.strip():
+            port = self._extract_host_port(out)
+            if port:
+                return f"http://{access_host}:{port}"
+        return None
+
+    def _detect_db_credentials(self, db_container: str) -> tuple[str, str]:
+        code, out, _ = self._run(["docker", "exec", db_container, "env"])
+        if code != 0 or not out:
+            return "admin", "admin"
+
+        env_map: dict[str, str] = {}
+        for line in out.splitlines():
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env_map[k.strip()] = v.strip()
+
+        # Prioriza root si existe; si no, usuario normal.
+        root_pass = env_map.get("MARIADB_ROOT_PASSWORD") or env_map.get("MYSQL_ROOT_PASSWORD")
+        if root_pass:
+            return "root", root_pass
+
+        user = env_map.get("MARIADB_USER") or env_map.get("MYSQL_USER") or "admin"
+        pwd = env_map.get("MARIADB_PASSWORD") or env_map.get("MYSQL_PASSWORD") or "admin"
+        return user, pwd
+
+    def _list_databases(self, db_container: str, db_user: str, db_password: str) -> list[str]:
+        u = self._sh_single_quote(db_user)
+        p = self._sh_single_quote(db_password)
+        list_cmd = (
+            "if [ -x /opt/bitnami/mariadb/bin/mariadb ]; then "
+            f"/opt/bitnami/mariadb/bin/mariadb -h 127.0.0.1 -u {u} -p{p} -N -e 'SHOW DATABASES;'; "
+            "else "
+            f"mysql -h 127.0.0.1 -u {u} -p{p} -N -e 'SHOW DATABASES;'; "
+            "fi"
+        )
+        code, out, _ = self._run(
+            [
+                "docker",
+                "exec",
+                db_container,
+                "sh",
+                "-c",
+                list_cmd,
+            ]
+        )
+        if code != 0 or not out:
+            return []
+
+        ignored = {"information_schema", "performance_schema", "mysql", "sys", "test"}
+        return [line.strip() for line in out.splitlines() if line.strip() and line.strip().lower() not in ignored]
+
+    @staticmethod
+    def _sh_single_quote(value: str) -> str:
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def _set_import_status(self, status_var: tk.StringVar, window: tk.Toplevel, text: str) -> None:
+        status_var.set(text)
+        window.update_idletasks()
+
+    def _ensure_running_for_import(self, container: str, role_label: str) -> bool:
+        if self._is_container_running(container):
+            return True
+
+        if not messagebox.askyesno(
+            "Importar",
+            f"El contenedor Shopify '{container}' esta apagado.\n\nQuieres arrancarlo ahora?",
+        ):
+            return False
+
+        code, _, err = self._run(["docker", "start", container])
+        if code != 0:
+            messagebox.showerror("Importar", err or f"No se pudo arrancar {container}.")
+            return False
+        return True
+
+    @staticmethod
+    def _request_import_cancel(status_var: tk.StringVar, stop_event: threading.Event, stop_button: ttk.Button) -> None:
+        stop_event.set()
+        stop_button.configure(state="disabled")
+        status_var.set("Cancelando... esperando fin del paso actual")
+
+    def _pick_theme_zip_file(self, target_var: tk.StringVar) -> None:
+        path = filedialog.askopenfilename(
+            title="Seleccionar tema Shopify (.zip)",
+            initialdir=self.tools_dir,
+            filetypes=[("Archivo ZIP", "*.zip"), ("Todos los archivos", "*.*")],
+        )
+        if path:
+            target_var.set(path)
+
+    def _pick_theme_folder(self, target_var: tk.StringVar) -> None:
+        path = filedialog.askdirectory(
+            title="Seleccionar carpeta del tema Shopify",
+            initialdir=self.tools_dir,
+        )
+        if path:
+            target_var.set(path)
+
+    def _pick_export_directory(self, target_var: tk.StringVar) -> None:
+        path = filedialog.askdirectory(title="Seleccionar carpeta de salida", initialdir=self.tools_dir)
+        if path:
+            target_var.set(path)
+
+    @staticmethod
+    def _default_export_folder() -> str:
+        return os.path.join(os.path.expanduser("~"), "Desktop", "shopify-export")
+
+    @staticmethod
+    def _build_timestamped_export_folder(base_dir: str) -> str:
+        base = os.path.abspath(base_dir)
+        stamp = datetime.now().strftime("%Y_%m_%d_%H-%M")
+        candidate = os.path.join(base, stamp)
+        if not os.path.exists(candidate):
+            return candidate
+        suffix = 1
+        while True:
+            c = os.path.join(base, f"{stamp}_{suffix:02d}")
+            if not os.path.exists(c):
+                return c
+            suffix += 1
+
+    def open_export_wizard(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        details = self._list_containers_details()
+        if not details:
+            messagebox.showwarning("Exportar", "No hay contenedores disponibles.")
+            return
+
+        shopify_candidates = [
+            name for (name, _status, image) in details
+            if any(token in (name + " " + image).lower()
+                   for token in ("shopify", "node", "theme"))
+        ]
+        if not shopify_candidates:
+            shopify_candidates = [name for (name, _status, _image) in details]
+
+        window = self._open_or_focus_work_tab("export", "Exportar")
+        if window is None:
+            messagebox.showerror("Interfaz", "No se pudo abrir la pestaña de Exportar.")
+            return
+
+        for child in window.winfo_children():
+            child.destroy()
+
+        outer = self._create_scrollable_surface(window, padding=(8, 8))
+        outer.columnconfigure(1, weight=1)
+        self._add_work_tab_header(outer, "Asistente de exportacion Shopify", "export")
+
+        shopify_container_var = tk.StringVar(value=shopify_candidates[0] if shopify_candidates else "")
+        store_url_var   = tk.StringVar(value="tu-tienda.myshopify.com")
+        theme_name_var  = tk.StringVar(value="")
+        output_dir_var  = tk.StringVar(value=self._default_export_folder())
+        export_mode_var = tk.StringVar(value="local")
+        status_var      = tk.StringVar(value="Configura los datos y pulsa Exportar.")
+        progress_var    = tk.DoubleVar(value=0)
+        stop_event      = threading.Event()
+
+        row = 1
+        ttk.Label(outer, text="Contenedor Shopify:").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(outer, textvariable=shopify_container_var,
+                     values=shopify_candidates, state="readonly").grid(row=row, column=1, sticky="ew", pady=4)
+
+        mode_frame = ttk.LabelFrame(outer, text="Modo de exportacion")
+        row += 1
+        mode_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        ttk.Radiobutton(mode_frame,
+            text="Solo archivos locales del contenedor  (sin conexion a Shopify)",
+            variable=export_mode_var, value="local").pack(anchor="w", padx=8, pady=(6, 2))
+        ttk.Radiobutton(mode_frame,
+            text="Descargar tema desde Shopify  (shopify theme pull — requiere login)",
+            variable=export_mode_var, value="remote").pack(anchor="w", padx=8, pady=(2, 6))
+
+        row += 1
+        store_label = ttk.Label(outer, text="URL de la tienda:")
+        store_label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        store_entry = ttk.Entry(outer, textvariable=store_url_var)
+        store_entry.grid(row=row, column=1, sticky="ew", pady=4)
+
+        row += 1
+        theme_label = ttk.Label(outer, text="Nombre del tema:")
+        theme_label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        theme_entry = ttk.Entry(outer, textvariable=theme_name_var)
+        theme_entry.grid(row=row, column=1, sticky="ew", pady=4)
+        theme_hint = ttk.Label(outer,
+            text="(opcional — si no se indica, el CLI pedira seleccionarlo en la terminal)",
+            style="Muted.TLabel")
+        theme_hint.grid(row=row, column=2, sticky="w", padx=(8, 0), pady=4)
+
+        row += 1
+        ttk.Label(outer, text="Carpeta destino:").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(outer, textvariable=output_dir_var).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Button(outer, text="Examinar",
+                   command=lambda: self._pick_export_directory(output_dir_var)).grid(
+                   row=row, column=2, padx=(8, 0), pady=4)
+
+        info_frame = ttk.LabelFrame(outer, text="Informacion")
+        row += 1
+        info_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        ttk.Label(info_frame,
+            text=("Local: empaqueta /app del contenedor en un .tar y lo extrae en la carpeta destino.\n"
+                  "Remoto: igual que Local, ademas ejecuta shopify theme pull — se pedira login Shopify\n"
+                  "        igual que en Crear/Recrear (URL de verificacion en el navegador)."),
+            wraplength=560, justify="left", style="Muted.TLabel").pack(padx=8, pady=6, anchor="w")
+
+        row += 1
+        ttk.Separator(outer, orient="horizontal").grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=(10, 8))
+        row += 1
+        ttk.Label(outer, textvariable=status_var).grid(row=row, column=0, columnspan=3, sticky="w")
+        row += 1
+        ttk.Progressbar(outer, orient="horizontal", mode="determinate",
+                        maximum=100, variable=progress_var).grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        row += 1
+        actions = ttk.Frame(outer)
+        actions.grid(row=row, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        cancel_button = ttk.Button(actions, text="Cancelar",
+                                   command=lambda: self._close_work_tab("export"))
+        cancel_button.pack(side="right")
+        stop_button = ttk.Button(actions, text="Detener exportacion", state="disabled",
+            command=lambda: self._request_import_cancel(status_var, stop_event, stop_button))
+        stop_button.pack(side="right", padx=(0, 8))
+        export_button = ttk.Button(actions, text="Exportar ahora",
+            command=lambda: self._run_export_from_wizard(
+                window=window, status_var=status_var, progress_var=progress_var,
+                export_button=export_button, cancel_button=cancel_button,
+                stop_button=stop_button, stop_event=stop_event,
+                shopify_container=shopify_container_var.get().strip(),
+                store_url=store_url_var.get().strip(),
+                theme_name=theme_name_var.get().strip(),
+                output_dir=output_dir_var.get().strip(),
+                export_mode=export_mode_var.get(),
+            ))
+        export_button.pack(side="right", padx=(0, 8))
+
+        def _on_mode_change(*_: object) -> None:
+            if export_mode_var.get() == "remote":
+                store_label.grid(); store_entry.grid()
+                theme_label.grid(); theme_entry.grid(); theme_hint.grid()
+            else:
+                store_label.grid_remove(); store_entry.grid_remove()
+                theme_label.grid_remove(); theme_entry.grid_remove(); theme_hint.grid_remove()
+
+        export_mode_var.trace_add("write", _on_mode_change)
+        _on_mode_change()
+
+    def _run_export_from_wizard(
+        self,
+        window: ttk.Frame,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        export_button: ttk.Button,
+        cancel_button: ttk.Button,
+        stop_button: ttk.Button,
+        stop_event: threading.Event,
+        shopify_container: str,
+        store_url: str,
+        theme_name: str,
+        output_dir: str,
+        export_mode: str,
+    ) -> None:
+        if not shopify_container:
+            messagebox.showwarning("Exportar", "Selecciona un contenedor Shopify.")
+            return
+        if export_mode == "remote" and not store_url:
+            messagebox.showwarning("Exportar", "Indica la URL de la tienda para el modo remoto.")
+            return
+        if not output_dir:
+            messagebox.showwarning("Exportar", "Selecciona la carpeta de destino.")
+            return
+
+        output_dir = output_dir.strip().strip('"')
+        final_output_dir = self._build_timestamped_export_folder(output_dir)
+
+        mode_desc = ("Solo archivos locales" if export_mode == "local"
+                     else f"Descarga desde Shopify ({store_url}) + archivos locales")
+        if not messagebox.askyesno("Confirmar exportacion",
+            f"Contenedor: {shopify_container}\nModo: {mode_desc}\nCarpeta: {final_output_dir}\n\nConfirmas?"):
+            return
+
+        if not self._ensure_running_for_import(shopify_container, "Shopify"):
+            return
+
+        export_button.configure(state="disabled")
+        cancel_button.configure(state="disabled")
+        stop_button.configure(state="normal")
+        stop_event.clear()
+        progress_var.set(0)
+        status_var.set("Iniciando exportacion...")
+
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        worker = threading.Thread(
+            target=self._run_export_worker,
+            args=(events, stop_event, shopify_container, store_url, theme_name, final_output_dir, export_mode),
+            daemon=True,
+        )
+        worker.start()
+
+        self._poll_export_worker_queue(
+            window=window, status_var=status_var, progress_var=progress_var,
+            export_button=export_button, cancel_button=cancel_button,
+            stop_button=stop_button, events=events,
+            shopify_container=shopify_container, final_output_dir=final_output_dir,
+        )
+
+    def _run_export_worker(
+        self,
+        events: queue.Queue[tuple[str, object]],
+        stop_event: threading.Event,
+        shopify_container: str,
+        store_url: str,
+        theme_name: str,
+        output_dir: str,
+        export_mode: str,
+    ) -> None:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+
+            def check_cancel() -> None:
+                if stop_event.is_set():
+                    raise RuntimeError("EXPORT_CANCELLED_BY_USER")
+
+            def dbg(msg: str) -> None:
+                events.put(("debug", msg))
+
+            def strip_ansi(text: str) -> str:
+                import re as _r
+                text = _r.sub(r'\x1b\[[0-9;]*[mGKHF]', '', text)
+                text = _r.sub(r'â[\x80-\xbf][\x80-\xbf]', '', text)
+                return text.strip()
+
+            # PASO 1: exportar archivos locales
+            events.put(("progress", (5.0, "[1/2] Empaquetando archivos del contenedor...")))
+            dbg("Empaquetando /app del contenedor...")
+            code, _, err = self._run([
+                "docker", "exec", "-u", "root", shopify_container, "sh", "-c",
+                "tar chf /tmp/shopify-export.tar -C /app . 2>/dev/null || tar chf /tmp/shopify-export.tar -C /app ."
+            ])
+            if code != 0:
+                raise RuntimeError(err or "No se pudo empaquetar el contenedor")
+
+            events.put(("progress", (25.0, "[1/2] Copiando archivos al equipo local...")))
+            local_tar = os.path.join(output_dir, "shopify-local.tar")
+            code, _, err = self._run(["docker", "cp", f"{shopify_container}:/tmp/shopify-export.tar", local_tar])
+            if code != 0:
+                raise RuntimeError(err or "No se pudo copiar el tar al equipo")
+
+            local_dir = os.path.join(output_dir, "local")
+            os.makedirs(local_dir, exist_ok=True)
+            try:
+                with tarfile.open(local_tar, "r") as tar:
+                    try:
+                        tar.extractall(path=local_dir, filter="data")
+                    except TypeError:
+                        tar.extractall(path=local_dir)
+                dbg(f"Archivos locales extraidos en: {local_dir}")
+            except Exception as ex:
+                dbg(f"Aviso al extraer tar local: {ex}")
+
+            events.put(("progress", (50.0, "[1/2] Archivos locales exportados.")))
+
+            if export_mode != "remote":
+                events.put(("done", output_dir))
+                return
+
+            # PASO 2: login + theme pull via terminal interactiva
+            check_cancel()
+            events.put(("progress", (52.0, "[2/2] Abriendo terminal para login y descarga...")))
+            dbg("Limpiando sesion anterior...")
+            self._run(["docker", "exec", shopify_container, "sh", "-c",
+                "shopify logout 2>/dev/null || true; "
+                "rm -f /tmp/shopify_pull_ok /tmp/shopify_pull_fail 2>/dev/null || true; "
+                "mkdir -p /tmp/shopify-pull-export"])
+
+            safe_store = store_url.replace('"', '').replace("'", "")
+            safe_theme = theme_name.replace('"', '').replace("'", "") if theme_name else ""
+            theme_flag = f"--theme \"{safe_theme}\"" if safe_theme else ""
+            pull_inner = (
+                f"cd /tmp/shopify-pull-export"
+                f" && shopify theme pull --store {safe_store} {theme_flag} --force"
+                f" && touch /tmp/shopify_pull_ok"
+                f" || touch /tmp/shopify_pull_fail"
+            )
+            bat_lines = [
+                "@echo off",
+                "echo Iniciando login con Shopify CLI...",
+                "echo.",
+                f"docker exec -it {shopify_container} shopify auth login",
+                "SET LOGIN_CODE=%ERRORLEVEL%",
+                "IF %LOGIN_CODE% NEQ 0 (",
+                f"    docker exec {shopify_container} sh -c \"touch /tmp/shopify_pull_fail\"",
+                "    echo.",
+                "    echo ERROR: Login fallido o cancelado.",
+                "    echo Puedes cerrar esta ventana.",
+                "    pause",
+                "    exit /b 1",
+                ")",
+                "echo.",
+                "echo Login completado. Descargando tema desde Shopify...",
+                "echo.",
+                f"docker exec -it {shopify_container} sh -c \"{pull_inner}\"",
+                "echo.",
+                "echo Descarga finalizada. Puedes cerrar esta ventana.",
+                "pause",
+            ]
+            bat_content = "\r\n".join(bat_lines) + "\r\n"
+
+            import tempfile as _tmp
+            fd, bat_path = _tmp.mkstemp(prefix="shu_export_", suffix=".bat")
+            try:
+                with os.fdopen(fd, "w", encoding="cp1252", errors="replace") as fh:
+                    fh.write(bat_content)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+            try:
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "Shopify Export", "cmd.exe", "/c", bat_path],
+                    shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                dbg(f"Terminal abierta: shopify auth login + theme pull --store {safe_store}")
+            except Exception as exc:
+                raise RuntimeError(f"No se pudo abrir la terminal: {exc}")
+
+            events.put(("export_terminal_opened", shopify_container))
+
+            # Esperar señal de exito o fallo
+            pull_ok = False
+            pull_fail = False
+            for tick in range(600):
+                check_cancel()
+                time.sleep(1.0)
+                rc_ok, _, _   = self._run(["docker", "exec", shopify_container,
+                    "sh", "-c", "test -f /tmp/shopify_pull_ok"])
+                rc_fail, _, _ = self._run(["docker", "exec", shopify_container,
+                    "sh", "-c", "test -f /tmp/shopify_pull_fail"])
+                # Comprobacion alternativa: archivos .liquid = pull exitoso
+                rc_liq, out_liq, _ = self._run(["docker", "exec", shopify_container,
+                    "sh", "-c", "find /tmp/shopify-pull-export -name '*.liquid' 2>/dev/null | head -1"])
+                has_liquid = rc_liq == 0 and bool((out_liq or "").strip())
+
+                if rc_ok == 0 or has_liquid:
+                    pull_ok = True
+                    dbg("Descarga completada.")
+                    self._run(["docker", "exec", shopify_container,
+                        "sh", "-c", "rm -f /tmp/shopify_pull_fail 2>/dev/null || true"])
+                    break
+                if rc_fail == 0 and not has_liquid:
+                    pull_fail = True
+                    dbg("Login/descarga fallido.")
+                    break
+                if tick % 20 == 0 and tick > 0:
+                    pct = 55.0 + min(18.0, tick * 0.03)
+                    events.put(("progress", (pct, f"[2/2] Esperando login y descarga... ({tick}s)")))
+
+            if pull_fail:
+                raise RuntimeError(
+                    "Login o descarga fallidos en la terminal.\n\n"
+                    "Revisa la ventana de terminal para ver el error.\n\n"
+                    "Los archivos LOCALES si se exportaron correctamente.")
+            if not pull_ok:
+                raise RuntimeError(
+                    "Timeout esperando la descarga (10 minutos).\n\n"
+                    "Los archivos LOCALES si se exportaron correctamente.")
+
+            dbg("Copiando tema descargado al equipo...")
+            events.put(("progress", (75.0, "[2/2] Descarga completada. Copiando al equipo...")))
+            pull_dir = os.path.join(output_dir, "remote")
+            os.makedirs(pull_dir, exist_ok=True)
+            self._run(["docker", "exec", shopify_container, "sh", "-c",
+                "tar chf /tmp/shopify-pull.tar -C /tmp/shopify-pull-export . 2>/dev/null || true"])
+            pull_tar = os.path.join(output_dir, "shopify-pull.tar")
+            rc_cp, _, _ = self._run(["docker", "cp",
+                f"{shopify_container}:/tmp/shopify-pull.tar", pull_tar])
+            if rc_cp == 0 and os.path.isfile(pull_tar):
+                try:
+                    with tarfile.open(pull_tar, "r") as tar:
+                        try:
+                            tar.extractall(path=pull_dir, filter="data")
+                        except TypeError:
+                            tar.extractall(path=pull_dir)
+                    dbg(f"Tema remoto extraido en: {pull_dir}")
+                except Exception as ex:
+                    dbg(f"Aviso al extraer: {ex}")
+
+            events.put(("done", output_dir))
+        except Exception as exc:
+            events.put(("debug", f"ERROR: {exc}"))
+            events.put(("error", str(exc)))
+
+    def _poll_export_worker_queue(
+        self,
+        window: ttk.Frame,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        export_button: ttk.Button,
+        cancel_button: ttk.Button,
+        stop_button: ttk.Button,
+        events: queue.Queue[tuple[str, object]],
+        shopify_container: str,
+        final_output_dir: str,
+        debug_window: "tk.Toplevel | None" = None,
+        debug_text: "tk.Text | None" = None,
+    ) -> None:
+        completed_output: str | None = None
+        failed: str | None = None
+        latest_progress: tuple[float, str] | None = None
+        debug_lines: list[str] = []
+        processed = 0
+
+        while processed < 120:
+            try:
+                kind, payload = events.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+
+            if kind == "progress":
+                value, text = payload  # type: ignore[misc]
+                latest_progress = (float(value), str(text))
+            elif kind == "debug":
+                debug_lines.append(str(payload))
+            elif kind == "export_terminal_opened":
+                status_var.set("Terminal abierta — sigue los pasos en la ventana negra...")
+                info_dlg = tk.Toplevel(self.root)
+                info_dlg.title("Shopify Export — terminal abierta")
+                info_dlg.geometry("500x260")
+                info_dlg.resizable(False, False)
+                info_dlg.configure(bg="#f1f5f9")
+                tk.Label(info_dlg, text="Sigue los pasos en la terminal",
+                         font=("Segoe UI Semibold", 13), bg="#f1f5f9", fg="#0f766e").pack(pady=(18, 6))
+                tk.Label(info_dlg,
+                         text="Se ha abierto una ventana de terminal.\n\n"
+                              "Pasos:\n"
+                              "  1. Sigue las instrucciones de Shopify CLI (login)\n"
+                              "  2. Abre la URL en el navegador y confirma el codigo\n"
+                              "  3. El theme pull se ejecutara automaticamente tras el login\n"
+                              "  4. Cuando la terminal diga 'Descarga finalizada',\n"
+                              "     esta app copiara los archivos automaticamente.\n\n"
+                              "NO cierres la terminal hasta que termine.",
+                         font=("Segoe UI", 10), bg="#f1f5f9", fg="#365066",
+                         justify="left").pack(padx=20, pady=(0, 14))
+                ttk.Button(info_dlg, text="Entendido", command=info_dlg.destroy).pack()
+            elif kind == "done":
+                completed_output = str(payload)
+            elif kind == "error":
+                failed = str(payload)
+
+        for line in debug_lines:
+            self._append_import_debug(debug_window, debug_text, line)
+
+        if latest_progress is not None:
+            progress_var.set(latest_progress[0])
+            status_var.set(latest_progress[1])
+
+        if completed_output is not None:
+            stop_button.configure(state="disabled")
+            progress_var.set(100)
+            status_var.set("Exportacion completada correctamente.")
+            self.log_event("EXPORT", shopify_container, "OK", f"Exportado en {completed_output}")
+            self.refresh_history()
+            messagebox.showinfo("Exportar",
+                f"Exportacion completada.\n\nCarpeta: {completed_output}\n\n"
+                "  local/   — archivos del contenedor\n"
+                "  remote/  — tema descargado desde Shopify (si modo remoto)")
+            return
+
+        if failed is not None:
+            stop_button.configure(state="disabled")
+            export_button.configure(state="normal")
+            cancel_button.configure(state="normal")
+            if failed == "EXPORT_CANCELLED_BY_USER":
+                status_var.set("Exportacion cancelada.")
+                messagebox.showinfo("Exportar", "Exportacion cancelada por el usuario.")
+                return
+            self.log_event("EXPORT", shopify_container, "ERROR", failed)
+            self.refresh_history()
+            status_var.set(f"Error: {failed[:80]}")
+            messagebox.showerror("Exportar", f"La exportacion fallo.\n\n{failed}")
+            return
+
+        delay = 40 if processed >= 120 else 150
+        self.root.after(delay, lambda: self._poll_export_worker_queue(
+            window=window, status_var=status_var, progress_var=progress_var,
+            export_button=export_button, cancel_button=cancel_button,
+            stop_button=stop_button, events=events,
+            shopify_container=shopify_container, final_output_dir=final_output_dir,
+            debug_window=debug_window, debug_text=debug_text,
+        ))
+
+    def open_import_wizard(self) -> None:
+        if not self.docker_ready():
+            messagebox.showerror("Docker", self._docker_unavailable_message())
+            return
+
+        details = self._list_containers_details()
+        if not details:
+            messagebox.showwarning("Importar", "No hay contenedores disponibles.")
+            return
+
+        shopify_candidates = [
+            name for (name, _status, image) in details
+            if any(token in (name + " " + image).lower()
+                   for token in ("shopify", "node", "theme"))
+        ]
+        if not shopify_candidates:
+            shopify_candidates = [name for (name, _status, _image) in details]
+
+        window = self._open_or_focus_work_tab("import", "Importar")
+        if window is None:
+            messagebox.showerror("Interfaz", "No se pudo abrir la pestaña de Importar.")
+            return
+
+        for child in window.winfo_children():
+            child.destroy()
+
+        outer = self._create_scrollable_surface(window, padding=(8, 8))
+        outer.columnconfigure(1, weight=1)
+        self._add_work_tab_header(outer, "Asistente de importacion Shopify", "import")
+
+        shopify_container_var = tk.StringVar(value=shopify_candidates[0] if shopify_candidates else "")
+        theme_path_var        = tk.StringVar(value="")
+        store_url_var         = tk.StringVar(value="tu-tienda.myshopify.com")
+        push_mode_var         = tk.StringVar(value="none")   # "none" | "push"
+        status_var            = tk.StringVar(value="Configura los datos y pulsa Importar.")
+        show_debug_var        = tk.BooleanVar(value=False)
+        stop_event            = threading.Event()
+
+        row = 1
+        ttk.Label(outer, text="Contenedor Shopify:").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(outer, textvariable=shopify_container_var,
+                     values=shopify_candidates, state="readonly").grid(row=row, column=1, sticky="ew", pady=4)
+
+        row += 1
+        ttk.Label(outer, text="Carpeta / ZIP del tema:").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(outer, textvariable=theme_path_var).grid(row=row, column=1, sticky="ew", pady=4)
+        pick_frame = ttk.Frame(outer)
+        pick_frame.grid(row=row, column=2, padx=(8, 0), pady=4)
+        ttk.Button(pick_frame, text="Archivo ZIP",
+                   command=lambda: self._pick_theme_zip_file(theme_path_var)).pack(side="left")
+        ttk.Button(pick_frame, text="Carpeta",
+                   command=lambda: self._pick_theme_folder(theme_path_var)).pack(side="left", padx=(6, 0))
+
+        # ── Modo de subida ───────────────────────────────────────────────────
+        push_frame = ttk.LabelFrame(outer, text="Despues de copiar al contenedor")
+        row += 1
+        push_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+
+        ttk.Radiobutton(
+            push_frame,
+            text="Solo copiar archivos al contenedor  (sin subir a Shopify)",
+            variable=push_mode_var, value="none",
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+        ttk.Radiobutton(
+            push_frame,
+            text="Copiar + subir tema a Shopify  (shopify theme push — requiere login)",
+            variable=push_mode_var, value="push",
+        ).pack(anchor="w", padx=8, pady=(2, 6))
+
+        # ── Tienda (solo visible si push) ────────────────────────────────────
+        row += 1
+        store_label = ttk.Label(outer, text="URL de la tienda:")
+        store_label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        store_entry = ttk.Entry(outer, textvariable=store_url_var)
+        store_entry.grid(row=row, column=1, sticky="ew", pady=4)
+
+        # ── Info ─────────────────────────────────────────────────────────────
+        info_frame = ttk.LabelFrame(outer, text="Que hace este asistente")
+        row += 1
+        info_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        ttk.Label(
+            info_frame,
+            text=(
+                "1. Copia el tema (carpeta o ZIP) a /app/horizon del contenedor (y se aplica en local).\n"
+                "2. Ejecuta npm install en la carpeta del tema.\n"
+                "3. Opcionalmente abre una terminal para hacer shopify auth login\n"
+                "   y shopify theme push (igual que el export, requiere login interactivo)."
+            ),
+            wraplength=560, justify="left", style="Muted.TLabel",
+        ).pack(padx=8, pady=6, anchor="w")
+
+        row += 1
+        ttk.Separator(outer, orient="horizontal").grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=(10, 8))
+
+        row += 1
+        ttk.Checkbutton(
+            outer,
+            text="Mostrar log de debug (consola detallada)",
+            variable=show_debug_var,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        row += 1
+        status_label = ttk.Label(outer, textvariable=status_var)
+        status_label.grid(row=row, column=0, columnspan=3, sticky="w")
+
+        row += 1
+        progress_var = tk.DoubleVar(value=0)
+        ttk.Progressbar(outer, orient="horizontal", mode="determinate",
+                        maximum=100, variable=progress_var).grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        row += 1
+        actions = ttk.Frame(outer)
+        actions.grid(row=row, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        cancel_button = ttk.Button(actions, text="Cancelar", command=window.destroy)
+        cancel_button.pack(side="right")
+        stop_button = ttk.Button(
+            actions, text="Detener importacion", state="disabled",
+            command=lambda: self._request_import_cancel(status_var, stop_event, stop_button),
+        )
+        stop_button.pack(side="right", padx=(0, 8))
+        import_button = ttk.Button(
+            actions, text="Importar ahora",
+            command=lambda: self._run_import_from_wizard(
+                window=window,
+                status_var=status_var,
+                progress_var=progress_var,
+                import_button=import_button,
+                cancel_button=cancel_button,
+                stop_button=stop_button,
+                stop_event=stop_event,
+                shopify_container=shopify_container_var.get().strip(),
+                theme_path=theme_path_var.get().strip(),
+                store_url=store_url_var.get().strip(),
+                push_mode=push_mode_var.get(),
+                show_debug=show_debug_var.get(),
+            ),
+        )
+        import_button.pack(side="right", padx=(0, 8))
+
+        def _on_push_mode_change(*_: object) -> None:
+            if push_mode_var.get() == "push":
+                store_label.grid()
+                store_entry.grid()
+            else:
+                store_label.grid_remove()
+                store_entry.grid_remove()
+
+        push_mode_var.trace_add("write", _on_push_mode_change)
+        _on_push_mode_change()
+
+    def _run_import_from_wizard(
+        self,
+        window: ttk.Frame,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        import_button: ttk.Button,
+        cancel_button: ttk.Button,
+        stop_button: ttk.Button,
+        stop_event: threading.Event,
+        shopify_container: str,
+        theme_path: str,
+        store_url: str,
+        push_mode: str,   # "none" | "push"
+        show_debug: bool = False,
+    ) -> None:
+        if not shopify_container:
+            messagebox.showwarning("Importar", "Selecciona un contenedor Shopify.")
+            return
+        if not theme_path or not os.path.exists(theme_path):
+            messagebox.showwarning("Importar", "Selecciona una carpeta o ZIP del tema valido.")
+            return
+        if push_mode == "push" and not store_url:
+            messagebox.showwarning("Importar", "Indica la URL de la tienda para subir el tema.")
+            return
+
+        mode_desc = (
+            "Solo copiar archivos al contenedor"
+            if push_mode == "none"
+            else f"Copiar + shopify theme push a {store_url}"
+        )
+        if not messagebox.askyesno(
+            "Confirmar importacion",
+            f"Contenedor: {shopify_container}\n"
+            f"Tema: {theme_path}\n"
+            f"Modo: {mode_desc}\n\n"
+            "Confirmas la importacion?",
+        ):
+            return
+
+        if not self._ensure_running_for_import(shopify_container, "Shopify"):
+            return
+
+        import_button.configure(state="disabled")
+        cancel_button.configure(state="disabled")
+        stop_button.configure(state="normal")
+        stop_event.clear()
+        progress_var.set(0)
+        status_var.set("Iniciando importacion...")
+
+        debug_win, debug_txt = (None, None)
+        if show_debug:
+            try:
+                debug_win, debug_txt = self._open_import_debug_console(window)
+            except Exception as e:
+                print(f"No se pudo abrir consola debug: {e}")
+
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        worker = threading.Thread(
+            target=self._run_import_worker,
+            args=(events, stop_event, shopify_container, theme_path, store_url, push_mode),
+            daemon=True,
+        )
+        worker.start()
+
+        self._poll_import_worker_queue_simple(
+            window=window,
+            status_var=status_var,
+            progress_var=progress_var,
+            import_button=import_button,
+            cancel_button=cancel_button,
+            stop_button=stop_button,
+            events=events,
+            shopify_container=shopify_container,
+            debug_window=debug_win,
+            debug_text=debug_txt,
+        )
+
+    def _run_import_worker(
+        self,
+        events: queue.Queue[tuple[str, object]],
+        stop_event: threading.Event,
+        shopify_container: str,
+        theme_path: str,
+        store_url: str,
+        push_mode: str,   # "none" | "push"
+    ) -> None:
+        try:
+            def check_cancel() -> None:
+                if stop_event.is_set():
+                    raise RuntimeError("IMPORT_CANCELLED_BY_USER")
+
+            def dbg(msg: str) -> None:
+                events.put(("debug", msg))
+
+            # ── PASO 1: Copiar tema al contenedor ────────────────────────────
+            events.put(("progress", (5.0, "[1/3] Validando y copiando tema al contenedor...")))
+
+            is_zip = theme_path.lower().endswith(".zip")
+            is_dir = os.path.isdir(theme_path)
+            dbg(f"=== INICIO IMPORT ===")
+            dbg(f"  theme_path recibido: {theme_path}")
+            dbg(f"  es ZIP: {is_zip}")
+            dbg(f"  es DIR: {is_dir}")
+            dbg(f"  existe: {os.path.exists(theme_path)}")
+            if is_dir:
+                try:
+                    contenido_raiz = os.listdir(theme_path)
+                    dbg(f"  contenido raiz ({len(contenido_raiz)} items): {contenido_raiz[:30]}")
+                    for item in contenido_raiz:
+                        full = os.path.join(theme_path, item)
+                        if os.path.isdir(full):
+                            sub = os.listdir(full)
+                            dbg(f"    DIR  {item}/ ({len(sub)} items): {sub[:15]}")
+                        else:
+                            sz = os.path.getsize(full)
+                            dbg(f"    FILE {item} ({sz} bytes)")
+                except Exception as e:
+                    dbg(f"  Error listando contenido: {e}")
+            elif is_zip:
+                try:
+                    sz = os.path.getsize(theme_path)
+                    dbg(f"  tamaño ZIP: {sz} bytes")
+                except Exception:
+                    pass
+            dbg(f"  push_mode: {push_mode}")
+            dbg(f"  store_url: {store_url}")
+            dbg(f"  shopify_container: {shopify_container}")
+
+            if is_zip:
+                dbg(f"Copiando ZIP al contenedor: {theme_path}")
+                remote_zip = "/tmp/shopify-import.zip"
+                code, _, err = self._run([
+                    "docker", "cp", theme_path, f"{shopify_container}:{remote_zip}"
+                ])
+                if code != 0:
+                    raise RuntimeError(err or "No se pudo copiar el ZIP al contenedor")
+                events.put(("progress", (30.0, "[1/3] Extrayendo ZIP en el contenedor...")))
+                unzip_cmd = (
+                    "rm -rf /app/horizon/* /app/horizon/.[!.]* 2>/dev/null; cd /app && "
+                    f"(unzip -o {remote_zip} -d horizon 2>/dev/null || "
+                    f"(apk add --no-cache unzip 2>/dev/null && unzip -o {remote_zip} -d horizon)) && "
+                    f"rm -f {remote_zip}"
+                )
+                dbg(f"Ejecutando unzip_cmd: {unzip_cmd}")
+                code, out, err = self._run([
+                    "docker", "exec", "-u", "root", shopify_container, "sh", "-c", unzip_cmd
+                ])
+                dbg(f"unzip resultado: code={code}, stdout={out[:500] if out else ''}, stderr={err[:500] if err else ''}")
+                if code != 0:
+                    raise RuntimeError(err or "No se pudo extraer el ZIP en el contenedor")
+                theme_container_path = "/app/horizon"
+
+            elif is_dir:
+                # ── PRE-PATCH settings_data.json ANTES de empaquetar ─────────
+                _sd_path = os.path.join(theme_path, "config", "settings_data.json")
+                _ss_path = os.path.join(theme_path, "config", "settings_schema.json")
+                if os.path.isfile(_sd_path) and os.path.isfile(_ss_path):
+                    try:
+                        import re as _re
+                        def _strip_js_comments(s):
+                            return _re.sub(r'//[^\n]*|/\*.*?\*/', '', s, flags=_re.DOTALL)
+                        with open(_sd_path, "r", encoding="utf-8") as _f:
+                            _raw_sd = _strip_js_comments(_f.read())
+                        with open(_ss_path, "r", encoding="utf-8") as _f:
+                            _raw_ss = _strip_js_comments(_f.read())
+                        # strict=False permite caracteres de control dentro de strings JSON
+                        _sd = json.loads(_raw_sd, strict=False)
+                        _ss = json.loads(_raw_ss, strict=False)
+                        _rules: dict = {}
+                        for _g in _ss:
+                            for _s in _g.get("settings", []):
+                                if _s.get("id"): _rules[_s["id"]] = _s
+                            for _b in _g.get("blocks", []):
+                                for _s in _b.get("settings", []):
+                                    if _s.get("id"): _rules[_s["id"]] = _s
+                        _modified = False
+                        _plog: list = []
+                        def _patch_obj(obj):
+                            nonlocal _modified
+                            if not isinstance(obj, dict): return
+                            if "badge_corner_radius" in obj:
+                                _r = _rules.get("badge_corner_radius", {})
+                                _vmax = int(_r.get("max", 40))
+                                _step = int(_r.get("step", 2))
+                                _safe = _vmax - _step
+                                _val = obj["badge_corner_radius"]
+                                _plog.append(f"[PRE-PATCH] badge_corner_radius={_val} schemaMax={_vmax} step={_step} safe={_safe}")
+                                if isinstance(_val, (int, float)) and _val >= _vmax:
+                                    _plog.append(f"[PRE-PATCH] badge_corner_radius {_val} -> {_safe}")
+                                    obj["badge_corner_radius"] = _safe
+                                    _modified = True
+                            for _v in obj.values():
+                                if isinstance(_v, dict): _patch_obj(_v)
+                        for _pval in _sd.get("presets", {}).values():
+                            _patch_obj(_pval)
+                        if isinstance(_sd.get("current"), dict):
+                            _patch_obj(_sd["current"])
+                        if _plog: dbg("\n".join(_plog))
+                        if _modified:
+                            with open(_sd_path, "w", encoding="utf-8") as _f:
+                                json.dump(_sd, _f, indent=2, ensure_ascii=False)
+                            dbg("[PRE-PATCH] settings_data.json guardado")
+                        else:
+                            dbg("[PRE-PATCH] sin cambios necesarios")
+                    except Exception as _pe:
+                        dbg(f"[PRE-PATCH] error no critico: {_pe}")
+                # ─────────────────────────────────────────────────────────────
+                dbg(f"Empaquetando carpeta: {theme_path}")
+                fd, tmp_tar = tempfile.mkstemp(prefix="shu_theme_", suffix=".tar")
+                os.close(fd)
+                try:
+                    with tarfile.open(tmp_tar, "w") as tar:
+                        tar.add(theme_path, arcname="horizon")
+                    events.put(("progress", (20.0, "[1/3] Copiando carpeta al contenedor...")))
+                    code, _, err = self._run([
+                        "docker", "cp", tmp_tar, f"{shopify_container}:/tmp/horizon.tar"
+                    ])
+                    if code != 0:
+                        raise RuntimeError(err or "No se pudo copiar el tema al contenedor")
+                    tar_cmd = "rm -rf /app/horizon/* /app/horizon/.[!.]* 2>/dev/null; cd /app && tar xf /tmp/horizon.tar && rm -f /tmp/horizon.tar"
+                    dbg(f"Ejecutando tar_cmd: {tar_cmd}")
+                    code, out, err = self._run([
+                        "docker", "exec", "-u", "root", shopify_container, "sh", "-c", tar_cmd
+                    ])
+                    dbg(f"tar resultado: code={code}, stdout={out[:500] if out else ''}, stderr={err[:500] if err else ''}")
+                    if code != 0:
+                        raise RuntimeError(err or "No se pudo extraer el tema en el contenedor")
+                finally:
+                    try:
+                        os.remove(tmp_tar)
+                    except OSError:
+                        pass
+                theme_container_path = "/app/horizon"
+            else:
+                raise RuntimeError("El archivo de tema debe ser una carpeta o un ZIP.")
+
+            dbg(f"Tema copiado en el contenedor: {theme_container_path}")
+            # Listar contenido del contenedor tras extracción
+            ls_code, ls_out, ls_err = self._run([
+                "docker", "exec", shopify_container, "sh", "-c",
+                "echo '=== /app/horizon ==='; ls -la /app/horizon/; "
+                "echo '=== subdirs ==='; for d in /app/horizon/*/; do echo \"$d: $(ls $d | wc -l) archivos\"; done; "
+                "echo '=== .liquid count ==='; find /app/horizon -name '*.liquid' | wc -l; "
+                "echo '=== .json count ==='; find /app/horizon -name '*.json' | wc -l"
+            ])
+            dbg(f"Contenido contenedor tras extracción:\n{ls_out}")
+            # --- AUTO-FIX DE SETTINGS_DATA.JSON ---
+            events.put(("progress", (45.0, "[Auto-Fix] Validando settings_data.json...")))
+            auto_fix_js = r"""
+const fs = require('fs');
+console.log('[AUTOFIX-V4] iniciando');
+try {
+  const dataPath = '/app/horizon/config/settings_data.json';
+  const schemaPath = '/app/horizon/config/settings_schema.json';
+  if (!fs.existsSync(dataPath) || !fs.existsSync(schemaPath)) { console.log('[AUTOFIX-V4] archivos no encontrados'); process.exit(0); }
+
+  const strip = (s) => s.replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g, (m, g) => g ? "" : m);
+  const data = JSON.parse(strip(fs.readFileSync(dataPath, 'utf8')));
+  const schema = JSON.parse(strip(fs.readFileSync(schemaPath, 'utf8')));
+
+  // Construir mapa de reglas del schema
+  const rules = {};
+  for (const group of schema) {
+    if (group.settings) for (const s of group.settings) { if (s.id) rules[s.id] = s; }
+    if (group.blocks) for (const b of group.blocks) { if (b.settings) for (const s of b.settings) { if (s.id) rules[s.id] = s; } }
+  }
+  console.log('[AUTOFIX-V4] schema rules cargadas: ' + Object.keys(rules).length);
+
+  let modified = false;
+  const log = [];
+
+  // Recopilar targets: current (si objeto) y cada preset
+  const targets = [];
+  if (data.current && typeof data.current === 'object') targets.push(data.current);
+  if (data.presets && typeof data.presets === 'object') {
+    for (const p in data.presets) {
+      if (typeof data.presets[p] === 'object') targets.push(data.presets[p]);
+    }
+  }
+  console.log('[AUTOFIX-V4] targets a parchear: ' + targets.length);
+
+  function patchTarget(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    if (Array.isArray(obj)) { obj.forEach(item => patchTarget(item)); return; }
+
+    for (const k in obj) {
+      const val = obj[k];
+
+      // Recurse into nested objects (sections, blocks, etc.)
+      if (val && typeof val === 'object') { patchTarget(val); continue; }
+
+      // Solo parchear si hay regla de schema para esta key
+      if (!rules[k]) continue;
+      const r = rules[k];
+
+      // --- Tipo numerico (number / range): parsear, clampear, alinear step ---
+      if (r.type === 'number' || r.type === 'range') {
+        let numVal = (typeof val === 'string') ? Number(val.replace(/[^0-9.\-]/g, '')) || 0
+                   : (typeof val === 'number') ? val : 0;
+
+        const hasMin = r.min !== undefined;
+        const hasMax = r.max !== undefined;
+        const minV = hasMin ? Number(r.min) : null;
+        const maxV = hasMax ? Number(r.max) : null;
+        const stepV = r.step !== undefined ? Number(r.step) : null;
+
+        // Clamp min
+        if (hasMin && numVal < minV) {
+          log.push('[FIX] ' + k + ': ' + numVal + ' -> min ' + minV);
+          numVal = minV;
+        }
+        // Clamp max
+        if (hasMax && numVal > maxV) {
+          log.push('[FIX] ' + k + ': ' + numVal + ' -> max ' + maxV);
+          numVal = maxV;
+        }
+        // Alinear al step
+        if (stepV && stepV > 0) {
+          const base = hasMin ? minV : 0;
+          let stepped = Math.round((numVal - base) / stepV) * stepV + base;
+          // Re-clamp tras alinear (el redondeo puede sacarlo de rango)
+          if (hasMin && stepped < minV) stepped = minV;
+          if (hasMax && stepped > maxV) {
+            // Bajar al step valido mas cercano por debajo del max
+            stepped = Math.floor((maxV - base) / stepV) * stepV + base;
+          }
+          if (numVal !== stepped) {
+            log.push('[FIX] ' + k + ': ' + numVal + ' -> step ' + stepped);
+            numVal = stepped;
+          }
+        }
+
+        // Shopify CLI espera STRINGS en settings_data.json, incluso para numeros
+        const finalVal = String(numVal);
+        if (obj[k] !== finalVal) {
+          log.push('[FIX] ' + k + ': ' + JSON.stringify(obj[k]) + ' -> "' + finalVal + '"');
+          obj[k] = finalVal;
+          modified = true;
+        }
+        continue;
+      }
+
+      // --- Tipo texto/select/radio/color/html: debe ser string ---
+      if ((r.type === 'text' || r.type === 'select' || r.type === 'radio' || r.type === 'color' || r.type === 'html') && typeof val === 'number') {
+        obj[k] = String(val);
+        modified = true;
+        log.push('[FIX] ' + k + ': number -> "' + obj[k] + '"');
+        continue;
+      }
+
+      // --- Tipo checkbox: debe ser boolean o string "true"/"false" ---
+      if (r.type === 'checkbox' && typeof val !== 'boolean' && val !== 'true' && val !== 'false') {
+        obj[k] = val ? 'true' : 'false';
+        modified = true;
+        log.push('[FIX] ' + k + ': ' + JSON.stringify(val) + ' -> "' + obj[k] + '"');
+      }
+    }
+  }
+
+  for (const t of targets) patchTarget(t);
+
+  if (log.length > 0) console.log(log.join('\\n'));
+  console.log('[AUTOFIX-V4] modified=' + modified);
+  if (modified) fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+  console.log('[AUTOFIX-V4] fin ok');
+} catch(e) { console.error('[AUTOFIX-V4] ERROR:', e.message); }
+"""
+            import tempfile as _af_tmp
+            fd_af, af_path = _af_tmp.mkstemp(prefix="shu_af_", suffix=".js")
+            try:
+                with os.fdopen(fd_af, "w", encoding="utf-8") as fh:
+                    fh.write(auto_fix_js)
+                self._run(["docker", "cp", af_path, f"{shopify_container}:/tmp/autofix.js"])
+                af_code, af_out, af_err = self._run(["docker", "exec", shopify_container, "node", "/tmp/autofix.js"])
+                dbg(f"AutoFix resultado: code={af_code}, stdout={af_out[:500] if af_out else ''}, stderr={af_err[:500] if af_err else ''}")
+            except Exception as e:
+                dbg(f"Error en autofix: {e}")
+            finally:
+                try:
+                    os.remove(af_path)
+                except OSError:
+                    pass
+
+            events.put(("progress", (50.0, "[2/3] Instalando dependencias npm...")))
+
+            # ── PASO 2: npm install ──────────────────────────────────────────
+            check_cancel()
+            npm_cmd = f"cd {theme_container_path} && npm install 2>/dev/null || true"
+            npm_done = threading.Event()
+            npm_result: list[tuple[int, str, str]] = []
+            def _do_npm() -> None:
+                npm_result.append(self._run(["docker", "exec", shopify_container, "sh", "-c", npm_cmd]))
+                npm_done.set()
+            threading.Thread(target=_do_npm, daemon=True).start()
+            tick = 0
+            while not npm_done.is_set():
+                check_cancel()
+                npm_done.wait(timeout=2.0)
+                tick += 1
+                pct = 50.0 + min(20.0, tick * 0.5)
+                events.put(("progress", (pct, f"[2/3] npm install... ({tick * 2}s)")))
+            dbg(f"npm install resultado: {npm_result[0][0] if npm_result else 'n/a'}")
+            events.put(("progress", (70.0, "[2/3] npm install completado.")))
+
+            if push_mode == "none":
+                events.put(("progress", (90.0, "[3/3] Reiniciando servidor local...")))
+                dbg("Reiniciando shopify theme dev con pkill...")
+                pk_code, pk_out, pk_err = self._run(["docker", "exec", shopify_container, "sh", "-c", "pkill -f 'shopify theme dev' || true"])
+                dbg(f"pkill resultado: code={pk_code}, stdout={pk_out}, stderr={pk_err}")
+                dbg("=== IMPORT LOCAL FINALIZADO ===")
+                events.put(("done", theme_container_path))
+                events.put(("workspace_ready", (shopify_container, theme_path)))
+                return
+
+            # ── PASO 3: theme push via terminal interactiva ──────────────────
+            check_cancel()
+            events.put(("progress", (72.0, "[3/3] Abriendo terminal para login y theme push...")))
+            dbg("Limpiando sesion anterior...")
+            self._run(["docker", "exec", shopify_container, "sh", "-c",
+                "shopify logout 2>/dev/null || true; "
+                "rm -f /tmp/shopify_push_ok /tmp/shopify_push_fail 2>/dev/null || true"])
+
+            safe_store = store_url.replace('"', '').replace("'", "")
+            push_inner = (
+                f"cd {theme_container_path}"
+                f" && shopify theme push --store {safe_store}"
+                f" && touch /tmp/shopify_push_ok"
+                f" || touch /tmp/shopify_push_fail"
+            )
+            bat_lines = [
+                "@echo off",
+                "echo Iniciando login con Shopify CLI...",
+                "echo.",
+                f"docker exec -it {shopify_container} shopify auth login",
+                "SET LOGIN_CODE=%ERRORLEVEL%",
+                "IF %LOGIN_CODE% NEQ 0 (",
+                f"    docker exec {shopify_container} sh -c \"touch /tmp/shopify_push_fail\"",
+                "    echo.",
+                "    echo ERROR: Login fallido o cancelado.",
+                "    echo Puedes cerrar esta ventana.",
+                "    pause",
+                "    exit /b 1",
+                ")",
+                "echo.",
+                "echo Login completado. Subiendo tema a Shopify...",
+                "echo.",
+                f"docker exec -it {shopify_container} sh -c \"{push_inner}\"",
+                "echo.",
+                "echo Subida finalizada. Puedes cerrar esta ventana.",
+                "pause",
+            ]
+            bat_content = "\r\n".join(bat_lines) + "\r\n"
+
+            import tempfile as _tmp
+            fd2, bat_path = _tmp.mkstemp(prefix="shu_push_", suffix=".bat")
+            try:
+                with os.fdopen(fd2, "w", encoding="cp1252", errors="replace") as fh:
+                    fh.write(bat_content)
+            except Exception:
+                try:
+                    os.close(fd2)
+                except OSError:
+                    pass
+
+            try:
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "Shopify Push", "cmd.exe", "/c", bat_path],
+                    shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                dbg(f"Terminal abierta: shopify auth login + theme push --store {safe_store}")
+            except Exception as exc:
+                raise RuntimeError(f"No se pudo abrir la terminal: {exc}")
+
+            events.put(("push_terminal_opened", shopify_container))
+
+            # Esperar señal de exito o fallo
+            push_ok = False
+            push_fail = False
+            for tick2 in range(600):
+                check_cancel()
+                time.sleep(1.0)
+                rc_ok, _, _  = self._run(["docker", "exec", shopify_container,
+                    "sh", "-c", "test -f /tmp/shopify_push_ok"])
+                rc_fail, _, _ = self._run(["docker", "exec", shopify_container,
+                    "sh", "-c", "test -f /tmp/shopify_push_fail"])
+                if rc_ok == 0:
+                    push_ok = True
+                    dbg("theme push completado.")
+                    break
+                if rc_fail == 0:
+                    push_fail = True
+                    dbg("theme push fallido.")
+                    break
+                if tick2 % 20 == 0 and tick2 > 0:
+                    events.put(("progress", (72.0 + min(20.0, tick2 * 0.03),
+                        f"[3/3] Esperando push en la terminal... ({tick2}s)")))
+
+            if push_fail:
+                raise RuntimeError(
+                    "Login o theme push fallidos en la terminal.\n\n"
+                    "Revisa la ventana de terminal para ver el error."
+                )
+            if not push_ok:
+                raise RuntimeError("Timeout esperando el theme push (10 minutos).")
+
+            events.put(("done", theme_container_path))
+        except Exception as exc:
+            events.put(("debug", f"ERROR: {exc}"))
+            events.put(("error", str(exc)))
+
+    def _poll_import_worker_queue_simple(
+        self,
+        window: ttk.Frame,
+        status_var: tk.StringVar,
+        progress_var: tk.DoubleVar,
+        import_button: ttk.Button,
+        cancel_button: ttk.Button,
+        stop_button: ttk.Button,
+        events: queue.Queue[tuple[str, object]],
+        shopify_container: str,
+        debug_window: "tk.Toplevel | None" = None,
+        debug_text: "tk.Text | None" = None,
+    ) -> None:
+        completed: str | None = None
+        failed: str | None = None
+        latest_progress: tuple[float, str] | None = None
+        debug_lines: list[str] = []
+        processed = 0
+        workspace_payload: tuple | None = None
+
+        while processed < 120:
+            try:
+                kind, payload = events.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+
+            if kind == "progress":
+                value, text = payload  # type: ignore[misc]
+                latest_progress = (float(value), str(text))
+            elif kind == "debug":
+                debug_lines.append(str(payload))
+            elif kind == "workspace_ready":
+                workspace_payload = payload  # type: ignore[assignment]
+            elif kind == "push_terminal_opened":
+                status_var.set("Terminal abierta — sigue los pasos en la ventana negra...")
+                info_dlg = tk.Toplevel(self.root)
+                info_dlg.title("Login Shopify — terminal abierta")
+                info_dlg.geometry("500x240")
+                info_dlg.resizable(False, False)
+                info_dlg.grab_set()
+                info_dlg.configure(bg="#f1f5f9")
+                tk.Label(info_dlg, text="Sigue los pasos en la terminal",
+                         font=("Segoe UI Semibold", 13), bg="#f1f5f9", fg="#0f766e").pack(pady=(18, 6))
+                tk.Label(info_dlg,
+                         text="Se ha abierto una ventana de terminal.\n\n"
+                              "Pasos:\n"
+                              "  1. Sigue las instrucciones de Shopify CLI (login)\n"
+                              "  2. Abre la URL en el navegador y confirma el codigo\n"
+                              "  3. El theme push se ejecutara automaticamente tras el login\n"
+                              "  4. Cuando la terminal diga 'Subida finalizada',\n"
+                              "     esta app terminara automaticamente.\n\n"
+                              "NO cierres la terminal hasta que termine.",
+                         font=("Segoe UI", 10), bg="#f1f5f9", fg="#365066",
+                         justify="left").pack(padx=20, pady=(0, 14))
+                ttk.Button(info_dlg, text="Entendido", command=info_dlg.destroy).pack()
+                info_dlg.wait_window()
+            elif kind == "done":
+                completed = str(payload)
+            elif kind == "error":
+                failed = str(payload)
+
+        for line in debug_lines:
+            self._append_import_debug(debug_window, debug_text, line)
+
+        if latest_progress is not None:
+            progress_var.set(latest_progress[0])
+            status_var.set(latest_progress[1])
+
+        if completed is not None:
+            stop_button.configure(state="disabled")
+            progress_var.set(100)
+            status_var.set("Importacion completada correctamente.")
+            self.log_event("IMPORT", shopify_container, "OK",
+                           f"Tema importado en {completed}")
+            self.refresh_history()
+            ws_path = ""
+            if workspace_payload:
+                _ws_container, _ws_local = workspace_payload
+                ws_path = self._create_vscode_workspace(
+                    shopify_container=str(_ws_container),
+                    theme_local_path=str(_ws_local),
+                )
+            msg = f"Importacion completada.\n\nTema en el contenedor: {completed}"
+            if ws_path:
+                msg += f"\n\nWorkspace VS Code creado:\n{ws_path}"
+            messagebox.showinfo("Importar", msg)
+            if ws_path:
+                self._show_docker_host_setup_dialog(
+                    shopify_container=shopify_container,
+                    ws_path=ws_path,
+                )
+            return
+
+        if failed is not None:
+            stop_button.configure(state="disabled")
+            import_button.configure(state="normal")
+            cancel_button.configure(state="normal")
+            if failed == "IMPORT_CANCELLED_BY_USER":
+                status_var.set("Importacion cancelada.")
+                messagebox.showinfo("Importar", "Importacion cancelada por el usuario.")
+                return
+            self.log_event("IMPORT", shopify_container, "ERROR", failed)
+            self.refresh_history()
+            status_var.set(f"Error: {failed[:80]}")
+            messagebox.showerror("Importar", f"La importacion fallo.\n\n{failed}")
+            return
+
+        delay = 40 if processed >= 120 else 150
+        self.root.after(delay, lambda: self._poll_import_worker_queue_simple(
+            window=window,
+            status_var=status_var,
+            progress_var=progress_var,
+            import_button=import_button,
+            cancel_button=cancel_button,
+            stop_button=stop_button,
+            events=events,
+            shopify_container=shopify_container,
+            debug_window=debug_window,
+            debug_text=debug_text,
+        ))
+
+    # ── Debug console helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _debug_timestamp() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _append_import_debug(self, debug_window: "tk.Toplevel | None", debug_text: "tk.Text | None", message: str) -> None:
+        if debug_window is None or debug_text is None:
+            return
+        try:
+            if not debug_window.winfo_exists() or not debug_text.winfo_exists():
+                return
+        except Exception:
+            return
+        line = f"[{self._debug_timestamp()}] {message.strip()}\n"
+        debug_text.configure(state="normal")
+        debug_text.insert("end", line)
+        debug_text.see("end")
+        debug_text.configure(state="disabled")
+
+    def _open_import_debug_console(self, parent: tk.Misc) -> "tuple[tk.Toplevel, tk.Text]":
+        debug_window = tk.Toplevel(parent)
+        debug_window.title("Debug importacion")
+        debug_window.geometry("900x360")
+        try:
+            debug_window.transient(parent)  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+        body = ttk.Frame(debug_window, padding=8)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        debug_text = tk.Text(
+            body, wrap="word", bg="#0b1220", fg="#cbd5e1",
+            insertbackground="#cbd5e1", relief="flat", borderwidth=1,
+            font=("Consolas", 10),
+        )
+        debug_text.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(body, orient="vertical", command=debug_text.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        debug_text.configure(yscrollcommand=y_scroll.set)
+
+        actions = ttk.Frame(body)
+        actions.grid(row=1, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(actions, text="Copiar log",
+                   command=lambda: self._copy_debug_text_to_clipboard(debug_window, debug_text)).pack(side="right", padx=(0, 8))
+        ttk.Button(actions, text="Limpiar",
+                   command=lambda: self._clear_debug_text(debug_text)).pack(side="right")
+
+        self._append_import_debug(debug_window, debug_text, "Consola de debug iniciada.")
+        return debug_window, debug_text
+
+    @staticmethod
+    def _clear_debug_text(debug_text: tk.Text) -> None:
+        try:
+            if not debug_text.winfo_exists():
+                return
+        except Exception:
+            return
+        debug_text.configure(state="normal")
+        debug_text.delete("1.0", "end")
+        debug_text.configure(state="disabled")
+
+    def _copy_debug_text_to_clipboard(self, debug_window: tk.Toplevel, debug_text: tk.Text) -> None:
+        try:
+            if not debug_window.winfo_exists() or not debug_text.winfo_exists():
+                return
+        except Exception:
+            return
+        content = debug_text.get("1.0", "end").strip()
+        if not content:
+            messagebox.showinfo("Debug", "No hay contenido para copiar.", parent=debug_window)
+            return
+        debug_window.clipboard_clear()
+        debug_window.clipboard_append(content)
+        messagebox.showinfo("Debug", "Log copiado al portapapeles.", parent=debug_window)
+
+    # ── VS Code Remote-SSH automático ────────────────────────────────────────
+
+    def _get_ssh_key_path(self) -> str:
+        """Devuelve la ruta de la clave privada SSH del usuario actual (id_ed25519 o id_rsa)."""
+        ssh_dir = os.path.join(os.path.expanduser("~"), ".ssh")
+        for name in ("id_ed25519", "id_rsa"):
+            candidate = os.path.join(ssh_dir, name)
+            if os.path.isfile(candidate):
+                return candidate
+        # Preferir ed25519 para crear si no existe ninguna
+        return os.path.join(ssh_dir, "id_ed25519")
+
+    def _generate_ssh_key_if_needed(self) -> tuple[bool, str, str]:
+        """
+        Genera un par de claves SSH ed25519 si no existe ninguna.
+        Devuelve (ok, private_key_path, mensaje).
+        """
+        key_path = self._get_ssh_key_path()
+        pub_path = key_path + ".pub"
+        if os.path.isfile(key_path) and os.path.isfile(pub_path):
+            return True, key_path, f"Clave existente: {key_path}"
+        # Crear directorio ~/.ssh si no existe
+        ssh_dir = os.path.dirname(key_path)
+        os.makedirs(ssh_dir, exist_ok=True)
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["icacls", ssh_dir, "/inheritance:r",
+                     "/grant:r", f"{os.environ.get('USERNAME', 'User')}:(OI)(CI)F"],
+                    capture_output=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
+        try:
+            result = subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-f", key_path, "-N", "", "-C", "shopify-utilidades"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return False, key_path, result.stderr or "ssh-keygen falló"
+            return True, key_path, f"Clave generada: {key_path}"
+        except FileNotFoundError:
+            return False, key_path, "ssh-keygen no encontrado. Instala OpenSSH client."
+        except Exception as exc:
+            return False, key_path, str(exc)
+
+    def _read_public_key(self, private_key_path: str) -> str:
+        """Lee el contenido de la clave pública (.pub)."""
+        pub_path = private_key_path + ".pub"
+        try:
+            with open(pub_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    def _install_pubkey_in_container(self, container: str, pubkey: str) -> tuple[bool, str]:
+        """
+        Instala la clave pública en /root/.ssh/authorized_keys del contenedor
+        usando docker exec (no necesita SSH todavía).
+        """
+        # Escapar la clave para usarla en sh -c
+        safe_key = pubkey.replace("'", "'\"'\"'")
+        cmd = (
+            "mkdir -p /root/.ssh && "
+            "chmod 700 /root/.ssh && "
+            f"echo '{safe_key}' >> /root/.ssh/authorized_keys && "
+            "sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys && "
+            "chmod 600 /root/.ssh/authorized_keys && "
+            "echo OK"
+        )
+        code, out, err = self._run(["docker", "exec", container, "sh", "-c", cmd])
+        if code != 0 or "OK" not in (out or ""):
+            return False, err or "No se pudo instalar la clave pública"
+        return True, "Clave pública instalada en el contenedor"
+
+    def _ensure_sshd_running(self, container: str, timeout_sec: int = 60) -> tuple[bool, str]:
+        """
+        Asegura que sshd esté corriendo dentro del contenedor.
+        Usa 'ps' en lugar de 'pgrep' porque pgrep no está disponible en node:alpine.
+        Si openssh no está instalado aún, lo instala via docker exec y luego arranca sshd.
+        Reintenta hasta timeout_sec segundos.
+        """
+        _CHECK = "ps 2>/dev/null | grep -v grep | grep -q sshd && echo RUNNING || echo STOPPED"
+
+        def _is_running() -> bool:
+            _, out, _ = self._run(["docker", "exec", container, "sh", "-c", _CHECK])
+            return "RUNNING" in (out or "")
+
+        # Comprobar si ya está activo (puede que el entrypoint lo haya arrancado)
+        if _is_running():
+            return True, "sshd ya estaba corriendo"
+
+        # Intentar arrancar sshd (puede que ya esté instalado pero no corriendo)
+        self._run(["docker", "exec", container, "sh", "-c",
+                   "/usr/sbin/sshd 2>/dev/null || sshd 2>/dev/null || true"])
+        if _is_running():
+            return True, "sshd arrancado correctamente"
+
+        # openssh todavía no instalado → instalarlo ahora via docker exec
+        install_cmd = (
+            "apk add --no-cache openssh openssh-server 2>/dev/null && "
+            "ssh-keygen -A 2>/dev/null || true && "
+            "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+            "touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && "
+            "{ grep -q 'PermitRootLogin yes' /etc/ssh/sshd_config 2>/dev/null || "
+            "  echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; } && "
+            "{ grep -q 'PubkeyAuthentication yes' /etc/ssh/sshd_config 2>/dev/null || "
+            "  echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config; } && "
+            "{ grep -q 'PasswordAuthentication no' /etc/ssh/sshd_config 2>/dev/null || "
+            "  echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config; } && "
+            "/usr/sbin/sshd 2>/dev/null || sshd 2>/dev/null || true"
+        )
+        self._run(["docker", "exec", container, "sh", "-c", install_cmd])
+
+        # Reintentar hasta timeout_sec con polling cada 3 s
+        deadline = time.time() + timeout_sec
+        attempt = 0
+        while time.time() < deadline:
+            if _is_running():
+                return True, f"sshd arrancado (intento {attempt + 1})"
+            time.sleep(3)
+            attempt += 1
+
+        return False, f"sshd no responde tras {timeout_sec}s"
+
+    def _write_ssh_config_entry(
+        self,
+        host_alias: str,
+        hostname: str,
+        ssh_port: int,
+        key_path: str,
+    ) -> tuple[bool, str]:
+        """
+        Escribe (o actualiza) una entrada en ~/.ssh/config para el host dado.
+        Si ya existe un bloque 'Host <alias>' lo sustituye.
+        """
+        ssh_dir = os.path.join(os.path.expanduser("~"), ".ssh")
+        os.makedirs(ssh_dir, exist_ok=True)
+        config_path = os.path.join(ssh_dir, "config")
+
+        new_block = (
+            f"Host {host_alias}\n"
+            f"  HostName {hostname}\n"
+            f"  Port {ssh_port}\n"
+            f"  User root\n"
+            f"  IdentityFile {key_path}\n"
+            f"  StrictHostKeyChecking no\n"
+            f"  ServerAliveInterval 60\n"
+        )
+
+        try:
+            existing = ""
+            if os.path.isfile(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    existing = f.read()
+
+            # Eliminar bloque antiguo con el mismo alias si existe
+            import re as _re
+            pattern = rf"(?m)^Host {re.escape(host_alias)}\s*\n(?:[ \t]+.*\n)*"
+            cleaned = _re.sub(pattern, "", existing)
+
+            # Añadir nuevo bloque al final
+            final = cleaned.rstrip("\n") + "\n\n" + new_block
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(final)
+
+            return True, f"~/.ssh/config actualizado (alias: {host_alias})"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _show_vscode_ssh_setup_dialog(
+        self,
+        shopify_container: str,
+        ssh_port: int,
+        ws_path: str,
+    ) -> None:
+        """
+        Diálogo que pregunta si el usuario quiere configurar acceso VS Code via SSH.
+        Si acepta:
+          1. Genera clave SSH en el PC si no existe
+          2. Copia la clave pública al contenedor via docker exec
+          3. Escribe ~/.ssh/config con el host configurado
+          4. Detecta si es local (127.0.0.1) o remoto (IP del docker_host)
+          5. Ofrece botón "Abrir en VS Code" al terminar
+        """
+        # Determinar hostname: local o IP remota
+        is_remote = self.docker_mode == "remote" and bool(self.docker_host)
+        if is_remote:
+            parsed = self._extract_host_port_from_docker_host(self.docker_host)
+            hostname = parsed[0] if parsed else "127.0.0.1"
+        else:
+            hostname = "127.0.0.1"
+
+        host_alias = shopify_container
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Configurar acceso VS Code via SSH")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.configure(bg="#f1f5f9")
+
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 560) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 520) // 2
+        dlg.geometry(f"560x520+{x}+{y}")
+
+        # ── Encabezado ────────────────────────────────────────────────────────
+        hdr = tk.Frame(dlg, bg="#0f766e", padx=20, pady=14)
+        hdr.pack(fill="x", side="top")
+        tk.Label(hdr, text="🔑  VS Code Remote-SSH automático",
+                 font=("Segoe UI Semibold", 13), bg="#0f766e", fg="#ffffff").pack(anchor="w")
+        tk.Label(hdr, text="Edita el código directamente en el contenedor desde VS Code",
+                 font=("Segoe UI", 9), bg="#0f766e", fg="#99f6e4").pack(anchor="w", pady=(2, 0))
+
+        # ── Botones (abajo) ───────────────────────────────────────────────────
+        btn_frame = tk.Frame(dlg, bg="#e2e8f0", padx=20, pady=12)
+        btn_frame.pack(fill="x", side="bottom")
+        tk.Frame(dlg, bg="#d1d5db", height=1).pack(fill="x", side="bottom")
+
+        # ── Cuerpo ────────────────────────────────────────────────────────────
+        body = tk.Frame(dlg, bg="#f1f5f9", padx=20, pady=12)
+        body.pack(fill="both", expand=True, side="top")
+
+        tk.Label(body, text="¿Qué va a hacer esta configuración?",
+                 font=("Segoe UI Semibold", 10), bg="#f1f5f9", fg="#0b2a3f").pack(anchor="w", pady=(0, 6))
+
+        steps_text = (
+            f"1.  Generar clave SSH en tu PC  (si no existe ya)\n"
+            f"2.  Instalar la clave pública en el contenedor\n"
+            f"    via  docker exec  (sin necesitar SSH todavía)\n"
+            f"3.  Escribir ~/.ssh/config  con el host configurado:\n"
+            f"      Host {host_alias}\n"
+            f"        HostName  {hostname}\n"
+            f"        Port      {ssh_port}\n"
+            f"        User      root\n"
+            f"4.  Abrir VS Code directamente con Remote-SSH"
+        )
+        info_box = tk.Frame(body, bg="#e0f2fe", padx=12, pady=10)
+        info_box.pack(fill="x", pady=(0, 10))
+        tk.Label(info_box, text=steps_text, font=("Consolas", 9),
+                 bg="#e0f2fe", fg="#0c4a6e", justify="left").pack(anchor="w")
+
+        # ── IP editable (solo si es remoto) ───────────────────────────────────
+        hostname_var = tk.StringVar(value=hostname)
+        if is_remote:
+            tk.Label(body, text="IP del servidor (editable):",
+                     font=("Segoe UI", 9), bg="#f1f5f9", fg="#365066").pack(anchor="w")
+            ttk.Entry(body, textvariable=hostname_var, font=("Consolas", 10)).pack(fill="x", pady=(4, 10))
+        else:
+            tk.Label(body,
+                     text="Modo local detectado → se usará 127.0.0.1",
+                     font=("Segoe UI", 9), bg="#f1f5f9", fg="#059669").pack(anchor="w", pady=(0, 10))
+
+        # ── Estado y progreso ─────────────────────────────────────────────────
+        status_lbl = tk.Label(body, text="", font=("Segoe UI", 9),
+                              bg="#f1f5f9", fg="#0f766e", wraplength=510, justify="left")
+        status_lbl.pack(anchor="w")
+
+        log_text = tk.Text(body, height=5, font=("Consolas", 8),
+                           bg="#1e293b", fg="#94a3b8", relief="flat",
+                           state="disabled", wrap="word")
+        log_text.pack(fill="x", pady=(6, 0))
+
+        def _log(msg: str) -> None:
+            log_text.configure(state="normal")
+            log_text.insert("end", msg + "\n")
+            log_text.see("end")
+            log_text.configure(state="disabled")
+            dlg.update_idletasks()
+
+        result: dict = {"done": False, "success": False}
+
+        def do_setup() -> None:
+            setup_btn.configure(state="disabled")
+            skip_btn.configure(state="disabled")
+            h = hostname_var.get().strip() or hostname
+
+            status_lbl.configure(text="Configurando acceso SSH...", fg="#f59e0b")
+            _log(f"→ Hostname: {h}  Puerto: {ssh_port}")
+
+            # Ejecutar en hilo para no bloquear la UI (sshd puede tardar ~60s)
+            def _worker() -> None:
+                # Paso 1: generar clave
+                dlg.after(0, lambda: _log("→ Generando/verificando clave SSH en el PC..."))
+                ok, key_path, msg = self._generate_ssh_key_if_needed()
+                dlg.after(0, lambda m=msg: _log(f"  {m}"))
+                if not ok:
+                    dlg.after(0, lambda m=msg: (
+                        status_lbl.configure(text=f"✘  Error: {m}", fg="#dc2626"),
+                        setup_btn.configure(state="normal"),
+                        skip_btn.configure(state="normal"),
+                    ))
+                    return
+
+                pubkey = self._read_public_key(key_path)
+                if not pubkey:
+                    dlg.after(0, lambda: (
+                        status_lbl.configure(text="✘  No se pudo leer la clave pública.", fg="#dc2626"),
+                        setup_btn.configure(state="normal"),
+                        skip_btn.configure(state="normal"),
+                    ))
+                    return
+
+                # Paso 2: instalar clave en contenedor
+                dlg.after(0, lambda: _log("→ Instalando clave pública en el contenedor via docker exec..."))
+                ok2, msg2 = self._install_pubkey_in_container(shopify_container, pubkey)
+                dlg.after(0, lambda m=msg2: _log(f"  {m}"))
+                if not ok2:
+                    dlg.after(0, lambda m=msg2: (
+                        status_lbl.configure(text=f"✘  {m}", fg="#dc2626"),
+                        setup_btn.configure(state="normal"),
+                        skip_btn.configure(state="normal"),
+                    ))
+                    return
+
+                # Paso 2b: asegurar que sshd esté corriendo (instala openssh si hace falta)
+                dlg.after(0, lambda: (
+                    _log("→ Arrancando sshd en el contenedor (puede tardar ~60s si es primera vez)..."),
+                    status_lbl.configure(text="Instalando/arrancando sshd... por favor espera.", fg="#f59e0b"),
+                ))
+                ok3, msg3 = self._ensure_sshd_running(shopify_container, timeout_sec=90)
+                dlg.after(0, lambda m=msg3: _log(f"  {m}"))
+                if not ok3:
+                    # sshd no arrancó pero seguimos — ~/.ssh/config ya es útil para cuando arranque
+                    dlg.after(0, lambda m=msg3: _log(f"  ⚠  {m}"))
+
+                # Paso 3: escribir ~/.ssh/config
+                dlg.after(0, lambda: _log(f"→ Escribiendo ~/.ssh/config  (alias: {host_alias})..."))
+                ok4, msg4 = self._write_ssh_config_entry(host_alias, h, ssh_port, key_path)
+                dlg.after(0, lambda m=msg4: _log(f"  {m}"))
+                if not ok4:
+                    dlg.after(0, lambda m=msg4: (
+                        status_lbl.configure(text=f"✘  {m}", fg="#dc2626"),
+                        setup_btn.configure(state="normal"),
+                        skip_btn.configure(state="normal"),
+                    ))
+                    return
+
+                self.log_event("SSH-SETUP", shopify_container, "OK",
+                               f"Remote-SSH configurado: {host_alias} → {h}:{ssh_port}")
+
+                result["done"] = True
+                result["success"] = True
+                result["key_path"] = key_path
+                result["host_alias"] = host_alias
+
+                if ok3:
+                    final_msg = f"✔  Listo. Conecta desde VS Code con:\n   ssh-remote+{host_alias}"
+                    final_color = "#059669"
+                else:
+                    final_msg = (
+                        f"⚠  ~/.ssh/config configurado, pero sshd aún no responde.\n"
+                        f"   Espera 1-2 min (primera instalación) y pulsa 'Abrir en VS Code'."
+                    )
+                    final_color = "#92400e"
+
+                dlg.after(0, lambda: (
+                    status_lbl.configure(text=final_msg, fg=final_color),
+                    _log("✔  Configuración completada."),
+                    setup_btn.configure(
+                        text="🗒  Abrir en VS Code (Remote-SSH)",
+                        state="normal",
+                        command=lambda: _open_vscode_ssh(host_alias, ws_path),
+                    ),
+                    skip_btn.configure(text="Cerrar", state="normal", command=dlg.destroy),
+                ))
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _open_vscode_ssh(alias: str, ws: str) -> None:
+            """Abre VS Code conectado via Remote-SSH al contenedor."""
+            vscode_uri = f"vscode://vscode-remote/ssh-remote+{alias}/app/horizon"
+            try:
+                if sys.platform == "win32":
+                    subprocess.Popen(
+                        ["cmd", "/c", "start", "", vscode_uri],
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", vscode_uri])
+                else:
+                    subprocess.Popen(["xdg-open", vscode_uri])
+            except Exception:
+                # Fallback: abrir workspace normal
+                if ws:
+                    self._open_vscode_workspace(ws)
+            dlg.destroy()
+
+        def do_skip() -> None:
+            dlg.destroy()
+            # Si tenemos ws_path, preguntar si abrir VS Code normal
+            if ws_path and messagebox.askyesno(
+                "VS Code Workspace",
+                f"Workspace creado:\n{ws_path}\n\n¿Abrirlo en VS Code?\n\n"
+                "(El acceso SSH no está configurado — se usará Dev Containers si está disponible)",
+            ):
+                self._open_vscode_workspace(ws_path)
+
+        setup_btn = ttk.Button(
+            btn_frame,
+            text="✔  Configurar SSH y abrir VS Code",
+            style="Accent.TButton",
+            command=do_setup,
+        )
+        setup_btn.pack(side="left")
+
+        skip_btn = ttk.Button(
+            btn_frame,
+            text="Saltar (lo haré manualmente)",
+            style="Ghost.TButton",
+            command=do_skip,
+        )
+        skip_btn.pack(side="left", padx=(10, 0))
+
+        dlg.protocol("WM_DELETE_WINDOW", do_skip)
+
+    # ── Configuración automática DOCKER_HOST en PC cliente ───────────────────
+
+    def _show_docker_host_setup_dialog(self, shopify_container: str, ws_path: str) -> None:
+        """
+        Muestra un diálogo que pregunta si el usuario quiere configurar DOCKER_HOST
+        en este PC para que VS Code pueda conectarse al contenedor remoto.
+        Si acepta, aplica la variable de entorno de forma permanente (Windows registry)
+        y opcionalmente abre el workspace en VS Code.
+        """
+        dh = (self.docker_host or "").strip()
+        is_remote = self.docker_mode == "remote" and bool(dh)
+
+        # En modo local solo preguntamos si quiere abrir VS Code, sin configurar nada
+        if not is_remote:
+            if ws_path and messagebox.askyesno(
+                "VS Code Workspace",
+                f"Workspace VS Code creado:\n{ws_path}\n\n¿Abrirlo en VS Code ahora?",
+            ):
+                self._open_vscode_workspace(ws_path)
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Configurar VS Code para edición remota en vivo")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.configure(bg="#f1f5f9")
+
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 540) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 520) // 2
+        dlg.geometry(f"540x520+{x}+{y}")
+
+        # ── Encabezado (top) ──────────────────────────────────────────────────
+        hdr = tk.Frame(dlg, bg="#0f766e", padx=20, pady=14)
+        hdr.pack(fill="x", side="top")
+        tk.Label(
+            hdr,
+            text="⚡  Configuración VS Code Remoto",
+            font=("Segoe UI Semibold", 13),
+            bg="#0f766e",
+            fg="#ffffff",
+        ).pack(anchor="w")
+        tk.Label(
+            hdr,
+            text="Para que VS Code se conecte al contenedor Docker remoto",
+            font=("Segoe UI", 9),
+            bg="#0f766e",
+            fg="#99f6e4",
+        ).pack(anchor="w", pady=(2, 0))
+
+        # ── Botones (declarados ANTES de body para que pack los reserve abajo) ──
+        btn_frame = tk.Frame(dlg, bg="#e2e8f0", padx=20, pady=12)
+        btn_frame.pack(fill="x", side="bottom")
+        tk.Frame(dlg, bg="#d1d5db", height=1).pack(fill="x", side="bottom")
+
+        # ── Cuerpo ────────────────────────────────────────────────────────────
+        body = tk.Frame(dlg, bg="#f1f5f9", padx=20, pady=12)
+        body.pack(fill="both", expand=True, side="top")
+
+        # ── Explicación ───────────────────────────────────────────────────────
+        tk.Label(
+            body,
+            text="¿Qué va a hacer esta configuración?",
+            font=("Segoe UI Semibold", 10),
+            bg="#f1f5f9",
+            fg="#0b2a3f",
+        ).pack(anchor="w", pady=(0, 6))
+
+        steps_text = (
+            f"1.  Establecer  DOCKER_HOST = {dh}\n"
+            f"    en las variables de entorno del sistema (permanente).\n\n"
+            f"2.  VS Code usará ese DOCKER_HOST para conectarse\n"
+            f"    al contenedor  '{shopify_container}'  en el servidor remoto.\n\n"
+            f"3.  Cualquier cambio que hagas en VS Code ocurrirá\n"
+            f"    directamente dentro del contenedor  →  live reload\n"
+            f"    automático en Shopify en 1-2 segundos."
+        )
+        info_box = tk.Frame(body, bg="#e0f2fe", padx=12, pady=10, relief="flat")
+        info_box.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            info_box,
+            text=steps_text,
+            font=("Segoe UI", 9),
+            bg="#e0f2fe",
+            fg="#0c4a6e",
+            justify="left",
+        ).pack(anchor="w")
+
+        # ── Valor de DOCKER_HOST editable ─────────────────────────────────────
+        tk.Label(
+            body,
+            text="Valor de DOCKER_HOST (puedes editarlo):",
+            font=("Segoe UI", 9),
+            bg="#f1f5f9",
+            fg="#365066",
+        ).pack(anchor="w")
+
+        dh_var = tk.StringVar(value=dh)
+        dh_entry = ttk.Entry(body, textvariable=dh_var, font=("Consolas", 10))
+        dh_entry.pack(fill="x", pady=(4, 12))
+
+        # ── Checkbox abrir VS Code ────────────────────────────────────────────
+        open_vscode_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            body,
+            text="Abrir el workspace en VS Code al terminar",
+            variable=open_vscode_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        restart_note = tk.Label(
+            body,
+            text="⚠  Es posible que necesites reiniciar VS Code para que tome el nuevo DOCKER_HOST.",
+            font=("Segoe UI", 8),
+            bg="#f1f5f9",
+            fg="#92400e",
+            wraplength=490,
+            justify="left",
+        )
+        restart_note.pack(anchor="w", pady=(0, 4))
+
+        result = {"applied": False}
+        status_lbl = tk.Label(body, text="", font=("Segoe UI", 9), bg="#f1f5f9", fg="#059669")
+        status_lbl.pack(anchor="w")
+
+        # ── Botones (ya declarados arriba, solo definimos las funciones aquí) ──
+
+        def do_apply() -> None:
+            host_value = dh_var.get().strip()
+            if not host_value:
+                messagebox.showwarning("DOCKER_HOST", "El valor no puede estar vacío.", parent=dlg)
+                return
+
+            apply_btn.configure(state="disabled")
+            skip_btn.configure(state="disabled")
+            status_lbl.configure(text="Aplicando...", fg="#f59e0b")
+            dlg.update_idletasks()
+
+            ok, msg = self._apply_docker_host_env(host_value)
+
+            if ok:
+                result["applied"] = True
+                status_lbl.configure(
+                    text=f"✔  DOCKER_HOST configurado: {host_value}",
+                    fg="#059669",
+                )
+                self.log_event("VSCODE", shopify_container, "OK", f"DOCKER_HOST configurado: {host_value}")
+                dlg.update_idletasks()
+                dlg.after(800, lambda: _finish(host_value))
+            else:
+                status_lbl.configure(text=f"✘  Error: {msg}", fg="#dc2626")
+                apply_btn.configure(state="normal")
+                skip_btn.configure(state="normal")
+
+        def _finish(host_value: str) -> None:
+            dlg.destroy()
+            messagebox.showinfo(
+                "DOCKER_HOST configurado",
+                f"Variable de entorno establecida:\n\n"
+                f"DOCKER_HOST = {host_value}\n\n"
+                f"Esta configuración es permanente.\n"
+                f"Si VS Code estaba abierto, ciérralo y vuelve a abrirlo\n"
+                f"para que tome el nuevo valor.",
+            )
+            if open_vscode_var.get() and ws_path:
+                self._open_vscode_workspace(ws_path)
+
+        def do_skip() -> None:
+            dlg.destroy()
+            # Aunque no configure, pregunta si abrir VS Code
+            if ws_path and messagebox.askyesno(
+                "VS Code Workspace",
+                f"Workspace creado:\n{ws_path}\n\n¿Abrirlo en VS Code ahora?\n\n"
+                f"(Recuerda configurar DOCKER_HOST manualmente si es necesario)",
+            ):
+                self._open_vscode_workspace(ws_path)
+
+        apply_btn = ttk.Button(
+            btn_frame,
+            text="✔  Configurar DOCKER_HOST automáticamente",
+            style="Accent.TButton",
+            command=do_apply,
+        )
+        apply_btn.pack(side="left")
+
+        skip_btn = ttk.Button(
+            btn_frame,
+            text="Saltar (lo haré manualmente)",
+            style="Ghost.TButton",
+            command=do_skip,
+        )
+        skip_btn.pack(side="left", padx=(10, 0))
+
+        dlg.protocol("WM_DELETE_WINDOW", do_skip)
+
+    def _apply_docker_host_env(self, host_value: str) -> tuple[bool, str]:
+        """
+        Establece DOCKER_HOST como variable de entorno permanente del sistema.
+        - Windows: escribe en el registro (HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Environment)
+          y notifica a todas las ventanas del cambio via WM_SETTINGCHANGE.
+        - Linux/Mac: añade línea al /etc/environment o ~/.bashrc como fallback.
+        Devuelve (True, "") si tuvo éxito o (False, mensaje_error) si falló.
+        """
+        if sys.platform == "win32":
+            return self._apply_docker_host_env_windows(host_value)
+        return self._apply_docker_host_env_unix(host_value)
+
+    def _apply_docker_host_env_windows(self, host_value: str) -> tuple[bool, str]:
+        """Escribe DOCKER_HOST en el registro de Windows (variables de sistema)."""
+        ps_script = f"""
+$ErrorActionPreference = 'Stop'
+try {{
+    # Escribir en variables de sistema (requiere admin) o de usuario como fallback
+    $regPathSystem = 'HKLM:\\System\\CurrentControlSet\\Control\\Session Manager\\Environment'
+    $regPathUser   = 'HKCU:\\Environment'
+
+    $written = $false
+    try {{
+        Set-ItemProperty -Path $regPathSystem -Name 'DOCKER_HOST' -Value '{host_value}' -Type String
+        $written = $true
+        Write-Output 'SYSTEM'
+    }} catch {{
+        # Sin privilegios de admin, usar variables de usuario
+        if (-not (Test-Path $regPathUser)) {{ New-Item -Path $regPathUser -Force | Out-Null }}
+        Set-ItemProperty -Path $regPathUser -Name 'DOCKER_HOST' -Value '{host_value}' -Type String
+        $written = $true
+        Write-Output 'USER'
+    }}
+
+    # Notificar a todas las ventanas del cambio de entorno
+    if ($written) {{
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinEnv {{
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+        uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+    public static readonly IntPtr HWND_BROADCAST = new IntPtr(0xffff);
+    public const uint WM_SETTINGCHANGE = 0x001A;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+}}
+"@
+        $result = [UIntPtr]::Zero
+        [WinEnv]::SendMessageTimeout(
+            [WinEnv]::HWND_BROADCAST,
+            [WinEnv]::WM_SETTINGCHANGE,
+            [UIntPtr]::Zero,
+            'Environment',
+            [WinEnv]::SMTO_ABORTIFHUNG,
+            5000,
+            [ref]$result
+        ) | Out-Null
+    }}
+    exit 0
+}} catch {{
+    Write-Error $_.Exception.Message
+    exit 1
+}}
+""".strip()
+
+        try:
+            proc = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-Command", ps_script,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if proc.returncode == 0:
+                scope = "sistema" if "SYSTEM" in (proc.stdout or "") else "usuario"
+                return True, f"Escrito en registro de Windows ({scope})"
+            err = (proc.stderr or proc.stdout or "Error desconocido").strip()
+            return False, err
+        except subprocess.TimeoutExpired:
+            return False, "Timeout ejecutando PowerShell"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _apply_docker_host_env_unix(self, host_value: str) -> tuple[bool, str]:
+        """Escribe DOCKER_HOST en /etc/environment (Linux/Mac) o ~/.bashrc como fallback."""
+        line = f'DOCKER_HOST="{host_value}"'
+        # Intentar /etc/environment (sistema)
+        try:
+            env_file = "/etc/environment"
+            with open(env_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Reemplazar línea existente o añadir nueva
+            import re as _re
+            if _re.search(r"^DOCKER_HOST=", content, _re.MULTILINE):
+                content = _re.sub(r"^DOCKER_HOST=.*$", line, content, flags=_re.MULTILINE)
+            else:
+                content = content.rstrip("\n") + f"\n{line}\n"
+            with open(env_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True, f"Escrito en {env_file}"
+        except PermissionError:
+            pass
+        except Exception as exc:
+            return False, str(exc)
+
+        # Fallback: ~/.bashrc y ~/.zshrc del usuario actual
+        written_to: list[str] = []
+        for rc_file in (
+            os.path.expanduser("~/.bashrc"),
+            os.path.expanduser("~/.zshrc"),
+            os.path.expanduser("~/.profile"),
+        ):
+            try:
+                if not os.path.exists(rc_file):
+                    continue
+                with open(rc_file, "r", encoding="utf-8") as f:
+                    rc_content = f.read()
+                import re as _re
+                export_line = f'export DOCKER_HOST="{host_value}"'
+                if _re.search(r"export DOCKER_HOST=", rc_content):
+                    rc_content = _re.sub(
+                        r"export DOCKER_HOST=.*$", export_line, rc_content, flags=_re.MULTILINE
+                    )
+                else:
+                    rc_content = rc_content.rstrip("\n") + f"\n{export_line}\n"
+                with open(rc_file, "w", encoding="utf-8") as f:
+                    f.write(rc_content)
+                written_to.append(rc_file)
+            except Exception:
+                continue
+
+        if written_to:
+            return True, f"Escrito en {', '.join(written_to)} (requiere nueva terminal)"
+        return False, "Sin permisos para escribir /etc/environment ni archivos de shell"
+
+    # ── VS Code Workspace Colaborativo ───────────────────────────────────────
+ 
+    # Carpeta del tema dentro del contenedor (parametrizable en el futuro)
+    CONTAINER_THEME_PATH = "/app/horizon"
+ 
+    def _create_vscode_workspace(
+        self,
+        shopify_container: str,
+        theme_local_path: str = "",
+        workspace_dir: str = "",
+    ) -> str:
+        """
+        Crea un .code-workspace de VS Code para el tema Shopify.
+ 
+        MODO LOCAL
+        ----------
+        VS Code se adjunta directamente al contenedor Docker local vía
+        "Dev Containers: Attach to Running Container".  Cualquier guardado
+        en /app/horizon es detectado al instante por `shopify theme dev`.
+ 
+        MODO REMOTO COLABORATIVO
+        ------------------------
+        Todos los programadores que abran este .code-workspace se conectan
+        al mismo contenedor (vía SSH o Docker TCP) → editan los mismos
+        archivos en /app/horizon → `shopify theme dev --live-reload` propaga
+        el cambio al navegador de cualquiera que tenga abierta la preview.
+ 
+        Flujo completo:
+          PC-A  guarda templates/index.liquid
+            → archivo cambia en el contenedor remoto
+              → shopify theme dev detecta el cambio (inotify)
+                → live-reload en TODOS los navegadores con la preview abierta
+        """
+        try:
+            return self._create_collaborative_workspace(
+                shopify_container=shopify_container,
+                theme_local_path=theme_local_path,
+                workspace_dir=workspace_dir,
+            )
+        except Exception as exc:
+            import traceback as _tb
+            self.log_event(
+                "WORKSPACE", shopify_container, "ERROR",
+                f"No se pudo crear workspace: {exc}\n{_tb.format_exc()}",
+            )
+            return ""
+ 
+    def _create_collaborative_workspace(
+        self,
+        shopify_container: str,
+        theme_local_path: str = "",
+        workspace_dir: str = "",
+    ) -> str:
+        """
+        Genera los artefactos del workspace colaborativo:
+          1. <container>.code-workspace     – abre en VS Code
+          2. .devcontainer/devcontainer.json – define el entorno
+          3. README-colaboracion.md          – guía para nuevos programadores
+          4. open_workspace.ps1 / .sh        – solo en modo TCP remoto
+ 
+        LÓGICA DE URI POR MODO (corrige el error ENOPRO):
+        ─────────────────────────────────────────────────
+        LOCAL →  attached-container+HEX  (Dev Containers local, funciona siempre)
+        TCP   →  NO se pone uri en folders; el devcontainer.json lleva "dockerHost"
+                 y se genera un script open_workspace que setea DOCKER_HOST antes
+                 de abrir VS Code (único modo fiable con Docker TCP remoto)
+        SSH   →  ssh-remote+user@host    (Remote-SSH resuelve el path en el host)
+        """
+        # ── Directorio de salida ──────────────────────────────────────────────
+        if workspace_dir and os.path.isdir(workspace_dir):
+            ws_dir = workspace_dir
+        elif theme_local_path and os.path.isdir(theme_local_path):
+            ws_dir = os.path.dirname(theme_local_path.rstrip("\\/")) or theme_local_path
+        else:
+            ws_dir = self.app_dir
+ 
+        ws_path        = os.path.join(ws_dir, f"{shopify_container}.code-workspace")
+        container_path = self.CONTAINER_THEME_PATH
+ 
+        is_remote = (self.docker_mode == "remote" and bool(self.docker_host))
+        dh        = self.docker_host or ""
+ 
+        # ── Determinar modo y construir metadatos ─────────────────────────────
+        if is_remote and dh.startswith("ssh://"):
+            # ── Modo SSH ──────────────────────────────────────────────────────
+            ssh_target = dh[6:]          # user@host
+            # SSH Remote resuelve el path directamente en el host remoto
+            container_folder_uri = f"vscode-remote://ssh-remote+{ssh_target}{container_path}"
+            remote_access_note   = (
+                f"SSH: {ssh_target}  →  {container_path}  "
+                f"(contenedor {shopify_container})\n"
+                "Instala 'Remote - SSH' en VS Code y abre este archivo."
+            )
+            docker_prefix     = f"docker -H {dh}"
+            devcontainer_type = "ssh"
+            devcontainer_host = ssh_target
+            server_addr       = ssh_target.split("@")[-1]
+            # La folder usa la URI ssh-remote
+            folder_entry: dict = {
+                "name": f"[SSH] {shopify_container} {container_path}  ← EDITA AQUÍ",
+                "uri":  container_folder_uri,
+            }
+ 
+        elif is_remote:
+            # ── Modo TCP remoto ───────────────────────────────────────────────
+            # CORRECCIÓN DEL ERROR ENOPRO:
+            # vscode-remote://attached-container+HEX SOLO funciona con Docker LOCAL.
+            # Con TCP remoto NO existe URI directa soportada por VS Code.
+            # Solución: la folder apunta a una ruta LOCAL vacía (el devcontainer.json
+            # contiene "dockerHost" para que Dev Containers sepa dónde conectarse),
+            # y se genera un script que abre VS Code con DOCKER_HOST ya seteado.
+            parsed     = self._extract_host_port_from_docker_host(dh)
+            remote_ip  = parsed[0] if parsed else dh
+            remote_access_note = (
+                f"Docker TCP remoto: {remote_ip}\n"
+                f"Contenedor: {shopify_container}  →  {container_path}\n"
+                f"USA el script open_workspace.ps1 (Windows) o open_workspace.sh\n"
+                f"para abrir VS Code. Ese script setea DOCKER_HOST={dh}\n"
+                f"antes de abrir, que es lo que Dev Containers necesita."
+            )
+            docker_prefix     = f"docker -H {dh}"
+            devcontainer_type = "tcp"
+            devcontainer_host = dh
+            server_addr       = remote_ip
+            # Sin "uri" → VS Code abre el workspace sin intentar resolver
+            # ningún sistema de archivos remoto hasta que Dev Containers
+            # lo gestiona a través del devcontainer.json con "dockerHost"
+            folder_entry = {
+                "name": f"[TCP {remote_ip}] {shopify_container} {container_path}  ← EDITA AQUÍ",
+                "path": ws_dir.replace("\\", "/"),   # carpeta local donde está el workspace
+            }
+ 
+        else:
+            # ── Modo local ────────────────────────────────────────────────────
+            container_hex = shopify_container.encode().hex()
+            container_folder_uri = (
+                f"vscode-remote://attached-container+{container_hex}{container_path}"
+            )
+            remote_access_note = (
+                f"Docker local\n"
+                f"Contenedor: {shopify_container}  →  {container_path}\n"
+                "Instala 'Remote - Containers' en VS Code."
+            )
+            docker_prefix     = "docker"
+            devcontainer_type = "local"
+            devcontainer_host = ""
+            server_addr       = "localhost"
+            folder_entry = {
+                "name": f"[LOCAL] {shopify_container} {container_path}  ← EDITA AQUÍ",
+                "uri":  container_folder_uri,
+            }
+ 
+        # ── Folders del workspace ─────────────────────────────────────────────
+        folders: list[dict] = []
+ 
+        if theme_local_path and os.path.isdir(theme_local_path):
+            theme_base_name = os.path.basename(theme_local_path.rstrip('\\/'))
+            folders.append({
+                "name": f"Tema local – {theme_base_name}",
+                "path": theme_local_path.replace("\\", "/"),
+            })
+ 
+        folders.append(folder_entry)
+ 
+        # ── Settings del workspace ────────────────────────────────────────────
+        workspace_settings: dict = {
+            "files.associations": {
+                "*.liquid": "liquid",
+                "*.json": "jsonc",
+            },
+            "editor.formatOnSave": False,
+            "editor.tabSize": 2,
+            "editor.rulers": [120],
+            "emmet.includeLanguages": {"liquid": "html"},
+            "[liquid]": {
+                "editor.defaultFormatter": "sissel.shopify-liquid",
+                "editor.wordWrap": "on",
+            },
+            # ── Auto-guardar: shopify theme dev detecta cambios al instante ──
+            "files.autoSave": "afterDelay",
+            "files.autoSaveDelay": 500,
+            "files.exclude": {
+                "**/node_modules": True,
+                "**/.git": True,
+            },
+            "search.exclude": {"**/node_modules": True},
+            # ── Live Share: mostrar cursores y presencia de otros ──────────
+            "liveshare.showInStatusBar": "always",
+            "liveshare.guestApprovalRequired": False,
+            "liveshare.anonymousGuestApproval": "accept",
+            # ── Metadatos internos (ignorados por VS Code) ─────────────────
+            "_shopify_container": shopify_container,
+            "_docker_mode": self.docker_mode,
+            "_docker_host": dh if is_remote else "local",
+            "_remote_note": remote_access_note,
+            "_live_reload": True,
+            "_colaborativo": is_remote,
+        }
+ 
+        # ── Extensiones recomendadas ──────────────────────────────────────────
+        # NOTA: ms-vsliveshare.vsliveshare es la CLAVE para colaboración en tiempo
+        #       real. Con Live Share activo, un programador comparte la sesión y
+        #       todos los demás ven y editan los mismos archivos simultáneamente.
+        extensions: dict = {
+            "recommendations": [
+                "ms-vscode-remote.remote-containers",   # Dev Containers
+                "ms-vscode-remote.remote-ssh",          # SSH Remote
+                "ms-vscode-remote.vscode-remote-extensionpack",
+                "ms-vsliveshare.vsliveshare",           # ← LIVE SHARE (clave)
+                "sissel.shopify-liquid",                # Sintaxis Liquid
+                "Shopify.theme-check-vscode",           # Linter oficial
+                "bradlc.vscode-tailwindcss",
+                "esbenp.prettier-vscode",
+                "streetsidesoftware.code-spell-checker",
+                "eamodio.gitlens",
+            ],
+        }
+ 
+        # ── Tareas VS Code ────────────────────────────────────────────────────
+        tasks: dict = {
+            "version": "2.0.0",
+            "tasks": [
+                {
+                    "label": "Shopify: Reiniciar theme dev (live reload)",
+                    "type": "shell",
+                    "command": (
+                        f"{docker_prefix} exec {shopify_container} "
+                        "sh -c \"pkill -f 'shopify theme dev' || true; "
+                        f"cd {container_path} && shopify theme dev --live-reload\""
+                    ),
+                    "group": "build",
+                    "presentation": {"reveal": "always"},
+                    "problemMatcher": [],
+                },
+                {
+                    "label": "Shopify: Ver logs en tiempo real",
+                    "type": "shell",
+                    "command": f"{docker_prefix} logs -f {shopify_container}",
+                    "group": "test",
+                    "presentation": {"reveal": "always", "panel": "new"},
+                    "problemMatcher": [],
+                },
+                {
+                    "label": "Shopify: Abrir shell en contenedor",
+                    "type": "shell",
+                    "command": f"{docker_prefix} exec -it {shopify_container} sh",
+                    "group": "test",
+                    "presentation": {"reveal": "always", "panel": "new"},
+                    "problemMatcher": [],
+                },
+                {
+                    "label": "Shopify: theme push (subir a la tienda)",
+                    "type": "shell",
+                    "command": (
+                        f"{docker_prefix} exec -it {shopify_container} "
+                        f"sh -c \"cd {container_path} && shopify theme push\""
+                    ),
+                    "group": "build",
+                    "presentation": {"reveal": "always", "panel": "new"},
+                    "problemMatcher": [],
+                },
+                {
+                    "label": "Shopify: theme pull (descargar desde la tienda)",
+                    "type": "shell",
+                    "command": (
+                        f"{docker_prefix} exec -it {shopify_container} "
+                        f"sh -c \"cd {container_path} && shopify theme pull --force\""
+                    ),
+                    "group": "build",
+                    "presentation": {"reveal": "always", "panel": "new"},
+                    "problemMatcher": [],
+                },
+                # ── Live Share ──────────────────────────────────────────────
+                {
+                    "label": "Live Share: Iniciar sesión colaborativa",
+                    "type": "shell",
+                    # Abre el panel de Live Share en VS Code
+                    "command": "workbench.action.liveShare.start",
+                    "group": "test",
+                    "presentation": {"reveal": "always"},
+                    "problemMatcher": [],
+                },
+            ],
+        }
+ 
+        workspace_content: dict = {
+            "folders": folders,
+            "settings": workspace_settings,
+            "extensions": extensions,
+            "tasks": tasks,
+            "launch": {"version": "0.2.0", "configurations": []},
+        }
+ 
+        with open(ws_path, "w", encoding="utf-8") as _f:
+            json.dump(workspace_content, _f, indent=2, ensure_ascii=False)
+ 
+        # ── Generar .devcontainer/devcontainer.json ───────────────────────────
+        devcontainer_dir  = os.path.join(ws_dir, ".devcontainer")
+        os.makedirs(devcontainer_dir, exist_ok=True)
+        devcontainer_path = os.path.join(devcontainer_dir, "devcontainer.json")
+ 
+        devcontainer = self._generate_devcontainer_json(
+            shopify_container = shopify_container,
+            container_path    = container_path,
+            devcontainer_type = devcontainer_type,
+            devcontainer_host = devcontainer_host,
+            extensions        = extensions["recommendations"],
+        )
+ 
+        with open(devcontainer_path, "w", encoding="utf-8") as _f:
+            json.dump(devcontainer, _f, indent=2, ensure_ascii=False)
+ 
+        # ── Generar scripts open_workspace (SOLO modo TCP remoto) ────────────
+        # En modo TCP no basta con hacer doble clic en el .code-workspace porque
+        # VS Code se lanza sin DOCKER_HOST seteado → Dev Containers no encuentra
+        # el daemon → error ENOPRO.  Los scripts setean DOCKER_HOST y LUEGO
+        # abren VS Code, que es el único flujo fiable con TCP remoto.
+        if devcontainer_type == "tcp" and devcontainer_host:
+            ws_basename = os.path.basename(ws_path)
+ 
+            # PowerShell (Windows)
+            ps1_path = os.path.join(ws_dir, "open_workspace.ps1")
+            ps1_content = f"""# Abre el workspace de Shopify apuntando al Docker remoto TCP
+# Doble clic (o ejecutar en PowerShell) – NO hace falta ejecutar como admin
+ 
+$env:DOCKER_HOST = '{devcontainer_host}'
+Write-Host "DOCKER_HOST -> $env:DOCKER_HOST"
+ 
+$wsPath = Join-Path $PSScriptRoot '{ws_basename}'
+$codePaths = @(
+    (Get-Command code -ErrorAction SilentlyContinue)?.Source,
+    "$env:LocalAppData\\Programs\\Microsoft VS Code\\Code.exe",
+    "$env:ProgramFiles\\Microsoft VS Code\\Code.exe"
+) | Where-Object {{ $_ -and (Test-Path $_) }} | Select-Object -First 1
+ 
+if ($codePaths) {{
+    Start-Process -FilePath $codePaths -ArgumentList "`"$wsPath`""
+}} else {{
+    Write-Warning "VS Code no encontrado. Abre manualmente: $wsPath"
+    Start-Sleep 3
+}}
+"""
+            with open(ps1_path, "w", encoding="utf-8-sig") as _f:
+                _f.write(ps1_content)
+ 
+            # Bash (Linux / macOS)
+            sh_path = os.path.join(ws_dir, "open_workspace.sh")
+            sh_content = f"""#!/usr/bin/env bash
+# Abre el workspace de Shopify apuntando al Docker remoto TCP
+export DOCKER_HOST='{devcontainer_host}'
+echo "DOCKER_HOST -> $DOCKER_HOST"
+ 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+code "$SCRIPT_DIR/{ws_basename}"
+"""
+            with open(sh_path, "w", encoding="utf-8") as _f:
+                _f.write(sh_content)
+            try:
+                import stat as _stat
+                os.chmod(sh_path, os.stat(sh_path).st_mode | _stat.S_IXUSR | _stat.S_IXGRP)
+            except Exception:
+                pass
+ 
+        # ── Generar README de colaboración ────────────────────────────────────
+        readme_path = os.path.join(ws_dir, "README-colaboracion.md")
+        self._write_collaboration_readme(
+            readme_path       = readme_path,
+            shopify_container = shopify_container,
+            container_path    = container_path,
+            server_addr       = server_addr,
+            is_remote         = is_remote,
+            devcontainer_type = devcontainer_type,
+            dh                = dh,
+            ws_path           = ws_path,
+        )
+ 
+        return ws_path
+ 
+    # ── Helpers del workspace ─────────────────────────────────────────────────
+ 
+    def _generate_devcontainer_json(
+        self,
+        shopify_container: str,
+        container_path: str,
+        devcontainer_type: str,           # "local" | "tcp" | "ssh"
+        devcontainer_host: str,           # vacío si local
+        extensions: list[str],
+    ) -> dict:
+        """
+        Genera el devcontainer.json correcto para cada modo de conexión.
+ 
+        MODO LOCAL y TCP
+        ─────────────────
+        Usa "dockerComposeFile" inexistente con "service" para que Dev Containers
+        detecte el contenedor ya en marcha (modo "attach").
+        En TCP añade "dockerHost" → Dev Containers apunta al daemon remoto
+        sin que el usuario tenga que configurar DOCKER_HOST manualmente.
+        (Soportado desde ms-vscode-remote.remote-containers v0.300.0)
+ 
+        MODO SSH
+        ────────
+        Remote-SSH gestiona la conexión al host; devcontainer.json es estándar.
+        """
+        vscode_settings = {
+            "terminal.integrated.defaultProfile.linux": "sh",
+            "files.autoSave": "afterDelay",
+            "files.autoSaveDelay": 500,
+            "liveshare.guestApprovalRequired": False,
+        }
+ 
+        base: dict = {
+            "name": f"Shopify – {shopify_container}",
+            # "attachContainer" le dice a Dev Containers que se adjunte a un
+            # contenedor EXISTENTE en lugar de crear uno nuevo.
+            "attachContainer": shopify_container,
+            "workspaceFolder": container_path,
+            "shutdownAction": "none",
+            "remoteUser": "root",
+            "customizations": {
+                "vscode": {
+                    "extensions": extensions,
+                    "settings": vscode_settings,
+                },
+            },
+            "forwardPorts": [9292, 3000],
+            "portsAttributes": {
+                "9292": {"label": "Shopify Dev Server", "onAutoForward": "notify"},
+                "3000": {"label": "Theme Preview",      "onAutoForward": "notify"},
+            },
+        }
+ 
+        if devcontainer_type == "tcp" and devcontainer_host:
+            # CLAVE: "dockerHost" le dice a Dev Containers dónde está el daemon.
+            # Sin este campo, con Docker TCP remoto, Dev Containers intenta usar
+            # el socket local y no encuentra el contenedor → error ENOPRO.
+            base["dockerHost"] = devcontainer_host
+ 
+        elif devcontainer_type == "ssh" and devcontainer_host:
+            base["remoteEnv"] = {"SHOPIFY_SSH_HOST": devcontainer_host}
+ 
+        return base
+ 
+    def _write_collaboration_readme(
+        self,
+        readme_path: str,
+        shopify_container: str,
+        container_path: str,
+        server_addr: str,
+        is_remote: bool,
+        devcontainer_type: str,
+        dh: str,
+        ws_path: str,
+    ) -> None:
+        """
+        Escribe README-colaboracion.md con todas las instrucciones necesarias
+        para que un nuevo programador se incorpore al workspace en <5 minutos.
+ 
+        CAMBIO: se guarda con utf-8-sig (BOM) para que Windows lo muestre bien.
+        """
+        ws_basename = os.path.basename(ws_path)
+ 
+        lines = [
+            f"# Workspace colaborativo – {shopify_container}",
+            "",
+            "## Arquitectura del flujo en vivo",
+            "",
+            "```",
+            f"PC-A (tú)          PC-B (compañero)   PC-N ...",
+            "   |                     |                 |",
+            "   +----------+----------+-----------------+",
+            "              |",
+            "              v",
+            f"  Docker: contenedor  {shopify_container}",
+            f"  {container_path}   ← archivos del tema",
+            "  shopify theme dev --live-reload",
+            "    → detecta cualquier cambio de archivo",
+            "    → propaga live-reload al navegador",
+            "```",
+            "",
+            "## Opción A – Remote Containers (todos en el mismo contenedor)",
+            "",
+            "Cada programador abre el MISMO contenedor Docker con VS Code.",
+            "Los archivos están en el contenedor → cualquier guardado es inmediato.",
+            "",
+            "### 1. Instalar extensiones",
+            "```bash",
+            "code --install-extension ms-vscode-remote.vscode-remote-extensionpack",
+            "code --install-extension sissel.shopify-liquid",
+            "code --install-extension Shopify.theme-check-vscode",
+            "```",
+            "",
+            "### 2. Abrir el workspace",
+            "```bash",
+            f'code "{ws_basename}"',
+            "```",
+            'VS Code mostrará "Reopen in Container" → pulsa **Yes**.',
+            "",
+        ]
+ 
+        # Instrucciones adicionales según modo
+        if is_remote and devcontainer_type == "tcp":
+            lines += [
+                "### 3. ⚠️ IMPORTANTE – Cómo abrir el workspace en modo TCP remoto",
+                "",
+                "> **NO hagas doble clic en el `.code-workspace` directamente.**",
+                "> VS Code se abriría sin `DOCKER_HOST` seteado y Dev Containers",
+                "> no encontraría el contenedor → error ENOPRO.",
+                "",
+                "**Usa siempre el script incluido:**",
+                "",
+                "```powershell",
+                "# Windows: doble clic en open_workspace.ps1",
+                "# o desde PowerShell:",
+                ".\\open_workspace.ps1",
+                "```",
+                "```bash",
+                "# Linux / macOS:",
+                "./open_workspace.sh",
+                "```",
+                "",
+                "El script setea `DOCKER_HOST` y luego abre VS Code.",
+                "Dev Containers usará el `dockerHost` del `devcontainer.json`",
+                f"(`{dh}`) para conectarse al daemon remoto automáticamente.",
+                "",
+                "**Alternativa manual** (si prefieres no usar el script):",
+                "```powershell",
+                f'$env:DOCKER_HOST = "{dh}"',
+                f'code "{os.path.basename(ws_path)}"',
+                "```",
+                "",
+            ]
+        elif is_remote and devcontainer_type == "ssh":
+            lines += [
+                "### 3. Configurar SSH (~/.ssh/config)",
+                "```",
+                "Host shopify-dev",
+                f"  HostName {server_addr}",
+                "  User root",
+                "  IdentityFile ~/.ssh/id_rsa",
+                "  ServerAliveInterval 60",
+                "```",
+                "",
+            ]
+ 
+        lines += [
+            "---",
+            "",
+            "## Opción B – VS Live Share (el anfitrión comparte la sesión)",
+            "",
+            "Live Share permite que los invitados vean y editen archivos en tiempo",
+            "real **sin necesitar acceso directo a Docker**.",
+            "",
+            "1. El anfitrión abre el workspace y pulsa **Live Share** en la barra inferior.",
+            "2. Copia el enlace de invitación y compártelo por Slack/Teams/etc.",
+            "3. Los invitados abren el enlace → quedan conectados al mismo editor.",
+            "4. Cualquier guardado del anfitrión (o de un invitado con permisos) llega",
+            "   al contenedor y `shopify theme dev` recarga la preview al instante.",
+            "",
+            "```bash",
+            "# Instalar Live Share (solo si no aparece la barra inferior):",
+            "code --install-extension ms-vsliveshare.vsliveshare",
+            "```",
+            "",
+            "---",
+            "",
+            "## URLs de preview",
+            "",
+            f"| Servicio          | URL                          |",
+            f"|-------------------|------------------------------|",
+            f"| Dev server        | `http://{server_addr}:9292`  |",
+            f"| Theme preview     | `http://{server_addr}:3000`  |",
+            "",
+            "## Tareas disponibles  (`Ctrl+Shift+P` → *Run Task*)",
+            "",
+            "| Tarea | Descripción |",
+            "|-------|-------------|",
+            "| Reiniciar theme dev | Reinicia el servidor con `--live-reload` |",
+            "| Ver logs en tiempo real | `docker logs -f` del contenedor |",
+            "| Abrir shell en contenedor | Acceso directo a `sh` |",
+            "| theme push | Sube el tema a la tienda Shopify |",
+            "| theme pull | Descarga el tema desde la tienda |",
+            "| Live Share: Iniciar sesión | Abre el panel de Live Share |",
+            "",
+            "## Notas importantes",
+            "",
+            f"- Los archivos del tema viven **dentro** del contenedor (`{container_path}`).",
+            "- El contenedor tiene `--restart unless-stopped`: arranca automáticamente",
+            "  con Docker, sin intervención manual.",
+            "- Para pair-programming visual usa **Live Share** (Opción B).",
+            "- Con Remote Containers (Opción A) todos editan literalmente el mismo",
+            "  directorio → sin conflictos de sincronización.",
+        ]
+ 
+        # FIX: guardar con utf-8-sig (BOM) → correcto en el Bloc de notas de Windows
+        with open(readme_path, "w", encoding="utf-8-sig") as _f:
+            _f.write("\n".join(lines) + "\n")
+ 
+    def _open_vscode_workspace(self, ws_path: str) -> None:
+        """
+        Abre el workspace en VS Code.
+ 
+        MEJORA: busca el ejecutable en las rutas habituales de Windows, Linux y macOS,
+        incluyendo instalaciones Flatpak y Snap.
+        """
+        if not ws_path or not os.path.isfile(ws_path):
+            return
+ 
+        # 1. 'code' en PATH (válido en todos los OS si VS Code está bien instalado)
+        try:
+            result = subprocess.run(
+                ["code", ws_path],
+                capture_output=True,
+                timeout=8,
+            )
+            if result.returncode == 0:
+                return
+        except Exception:
+            pass
+ 
+        # 2. Rutas conocidas de Windows
+        win_paths = [
+            os.path.join(
+                os.environ.get("LocalAppData", ""),
+                "Programs", "Microsoft VS Code", "Code.exe",
+            ),
+            os.path.join(
+                os.environ.get("ProgramFiles", ""),
+                "Microsoft VS Code", "Code.exe",
+            ),
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", ""),
+                "Microsoft VS Code", "Code.exe",
+            ),
+        ]
+ 
+        # 3. Rutas conocidas de Linux / macOS
+        unix_paths = [
+            "/usr/bin/code",
+            "/usr/local/bin/code",
+            "/snap/bin/code",                                  # Snap
+            "/var/lib/flatpak/exports/bin/com.visualstudio.code",  # Flatpak system
+            os.path.expanduser("~/.local/share/flatpak/exports/bin/com.visualstudio.code"),
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",  # macOS
+        ]
+ 
+        for vscode_exe in win_paths + unix_paths:
+            if vscode_exe and os.path.isfile(vscode_exe):
+                try:
+                    subprocess.Popen(
+                        [vscode_exe, ws_path],
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    return
+                except Exception:
+                    pass
+ 
+        # 4. Último recurso: os.startfile (solo Windows)
+        try:
+            os.startfile(ws_path)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def open_docs(self) -> None:
+        docs = self._find_first_existing([
+            "docker-shopify-docs.html",
+            os.path.join("version_bat", "docker-shopify-docs.html"),
+        ])
+        if not os.path.isfile(docs):
+            messagebox.showerror("Archivo", "No se encontro docker-shopify-docs.html")
+            return
+        try:
+            os.startfile(docs)  # type: ignore[attr-defined]
+            self.log_event("DOCS", "docker-shopify-docs.html", "INFO", "Documentacion abierta")
+            self.refresh_history()
+        except Exception as exc:  # pragma: no cover
+            self.log_event("DOCS", "docker-shopify-docs.html", "ERROR", str(exc))
+            messagebox.showerror("Documento", f"No se pudo abrir la documentacion.\n\n{exc}")
+
+    def open_app_docs(self) -> None:
+        docs = self._find_first_existing(["app-docs.html"])
+        if not os.path.isfile(docs):
+            messagebox.showerror("Archivo", "No se encontro app-docs.html")
+            return
+        try:
+            os.startfile(docs)  # type: ignore[attr-defined]
+            self.log_event("DOCS", "app-docs.html", "INFO", "Documentacion app abierta")
+            self.refresh_history()
+        except Exception as exc:  # pragma: no cover
+            self.log_event("DOCS", "app-docs.html", "ERROR", str(exc))
+            messagebox.showerror("Documento", f"No se pudo abrir la documentacion.\n\n{exc}")
+
+
+def main() -> None:
+    if sys.platform != "win32":
+        print("Esta app esta pensada para Windows.")
+
+    root = tk.Tk()
+    app = ShopifyUtilitiesApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    helper_exit_code = _run_helper_cli_from_argv(sys.argv)
+    if helper_exit_code is None:
+        main()
+    else:
+        raise SystemExit(helper_exit_code)
