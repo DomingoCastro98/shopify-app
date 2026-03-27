@@ -27,7 +27,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.1"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.0.2"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -210,6 +210,7 @@ while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{
 $copied = $false
 for ($i = 1; $i -le 80; $i++) {{
     try {{
+        Unblock-File -LiteralPath $newFile -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath $newFile -Destination $currentFile -Force -ErrorAction Stop
         $copied = $true
         break
@@ -231,10 +232,11 @@ if ($copied) {{
     Set-Ui 100 'Instalación finalizada. Reiniciando aplicación...'
     Start-Sleep -Milliseconds 600
     try {{
+        $workDir = Split-Path -Path $restartExe -Parent
         if ($restartArgs.Count -gt 0) {{
-            Start-Process -FilePath $restartExe -ArgumentList $restartArgs | Out-Null
+            Start-Process -FilePath $restartExe -ArgumentList $restartArgs -WorkingDirectory $workDir | Out-Null
         }} else {{
-            Start-Process -FilePath $restartExe | Out-Null
+            Start-Process -FilePath $restartExe -WorkingDirectory $workDir | Out-Null
         }}
     }} catch {{}}
     $form.Close()

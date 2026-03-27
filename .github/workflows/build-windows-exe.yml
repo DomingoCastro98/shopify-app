@@ -49,11 +49,15 @@ jobs:
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Tag detectado: $tag"
 
+      - name: Rename EXE without spaces
+        run: |
+          Move-Item "dist/Shopify Utilidades.exe" "dist/Shopify_Utilidades.exe"
+
       - name: Upload CI artifact
         uses: actions/upload-artifact@v4
         with:
           name: Shopify_Utilidades_${{ github.ref_name }}
-          path: dist/Shopify Utilidades.exe
+          path: dist/Shopify_Utilidades.exe
           if-no-files-found: error
 
       - name: Publish EXE to GitHub Release
@@ -62,6 +66,6 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          files: dist/Shopify Utilidades.exe
+          files: dist/Shopify_Utilidades.exe
           fail_on_unmatched_files: true
           generate_release_notes: true
