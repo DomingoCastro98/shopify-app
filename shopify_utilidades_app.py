@@ -116,12 +116,21 @@ def _ps_quote(value: str) -> str:
 
 
 def _launch_updater_and_exit(new_file_path: str, current_file_path: str, restart_cmd: list[str]) -> None:
+    """
+    Lanza un actualizador gráfico (PowerShell + WinForms) que:
+      1. Espera cierre de la app
+      2. Reemplaza archivo actual (.py/.exe) con reintentos
+      3. Relanza la app
+    Luego cierra el proceso actual para liberar el ejecutable.
+    """
     if not restart_cmd:
         return
 
     restart_exe = restart_cmd[0]
     restart_args = restart_cmd[1:]
-    restart_args_ps = ", ".join(f"'{_ps_quote(a)}'" for a in restart_args) if restart_args else ""
+    restart_args_ps = ", ".join(f"'{_ps_quote(a)}'" for a in restart_args)
+    if not restart_args_ps:
+        restart_args_ps = ""
 
     ps_script = f"""
 $ErrorActionPreference = 'SilentlyContinue'
@@ -137,7 +146,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Actualizando Aplicación'
+$form.Text = 'Actualizando Shopify Utilidades'
 $form.Size = New-Object System.Drawing.Size(500, 220)
 $form.StartPosition = 'CenterScreen'
 $form.TopMost = $true
@@ -189,52 +198,50 @@ function Set-Ui([int]$value, [string]$text) {{
 $form.Show()
 Set-Ui 5 'Esperando cierre de la app...'
 
-# Espera hasta que el proceso actual se cierre
+$waitTicks = 0
 while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 250
-    Set-Ui ((($bar.Value + 1) % 15) + 5) 'Esperando cierre de la app...'
+    $waitTicks++
+    $step = 5 + [int]([Math]::Min(15, $waitTicks / 2))
+    Set-Ui $step 'Esperando cierre de la app...'
+    if ($waitTicks -ge 120) {{ break }}
 }}
 
-# Detecta si el EXE actual está en una carpeta _MEI* (PyInstaller)
-$currentDir = Split-Path -Path $currentFile -Parent
-while ($currentDir -match '_MEI\d+') {{
-    Set-Ui 10 "Esperando extracción completa de PyInstaller..."
-    Start-Sleep -Milliseconds 500
-}}
-
-# Intentos robustos hasta reemplazar el EXE
 $copied = $false
-$maxAttempts = 200
-for ($i = 1; $i -le $maxAttempts; $i++) {{
+for ($i = 1; $i -le 80; $i++) {{
     try {{
-        # Verifica si el archivo está bloqueado
-        $fs = [System.IO.File]::Open($currentFile, 'Open', 'ReadWrite', 'None')
-        $fs.Close()
         Unblock-File -LiteralPath $newFile -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath $newFile -Destination $currentFile -Force -ErrorAction Stop
         $copied = $true
         break
-    }} catch {{
-        Set-Ui (20 + [int](($i / $maxAttempts) * 70)) "Esperando liberación del archivo... intento $i/$maxAttempts"
-        Start-Sleep -Milliseconds 250
-    }}
+    }} catch {{}}
+
+    $prog = 20 + [int](($i / 80) * 70)
+    Set-Ui $prog "Aplicando actualización... intento $i/80"
+    Start-Sleep -Milliseconds 250
 }}
 
 if ($copied) {{
-    Start-Sleep -Milliseconds 4000
-    Set-Ui 100 'Actualización finalizada. Reiniciando aplicación...'
-    try {{
-        $workDir = Split-Path -Path $restartExe -Parent
-        if ($restartArgs.Count -gt 0) {{
-            Start-Process -FilePath $restartExe -ArgumentList $restartArgs -WorkingDirectory $workDir | Out-Null
-        }} else {{
-            Start-Process -FilePath $restartExe -WorkingDirectory $workDir | Out-Null
-        }}
-    }} catch {{}}
+    # IMPORTANTE: NO borrar carpetas _MEI antes de relanzar el .exe.
+    # PyInstaller extrae la DLL de Python en una carpeta _MEI nueva al arrancar.
+    # Si se borran _MEI* justo antes del relanzamiento, el nuevo proceso puede
+    # encontrar su carpeta a medias o vacía → "Failed to load Python DLL".
+    # Las carpetas _MEI del proceso anterior ya quedaron libres al cerrarlo;
+    # Windows las limpiará en el siguiente arranque o limpieza de temp.
+    Remove-Item -LiteralPath $newFile -Force -ErrorAction SilentlyContinue
+
+    Set-Ui 100 'Instalación finalizada.'
+    Start-Sleep -Milliseconds 1000
+    [System.Windows.Forms.MessageBox]::Show(
+        'La actualización se ha instalado correctamente. Por favor, abre la aplicación manualmente.',
+        'Actualización exitosa',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
     $form.Close()
 }} else {{
     [System.Windows.Forms.MessageBox]::Show(
-        'No se pudo reemplazar el archivo. Cierra la app y vuelve a intentar.',
+        'No se pudo reemplazar el archivo porque sigue en uso. Cierra la app y vuelve a intentar.',
         'Error de actualización',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
@@ -246,22 +253,32 @@ while ($form.Visible) {{
     Start-Sleep -Milliseconds 100
 }}
 
-# Limpieza del script temporal
-Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "ping 127.0.0.1 -n 2 >nul & del /f /q `"$selfScript`"" -WindowStyle Hidden | Out-Null
+# Limpieza del propio script temporal del updater
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "ping 127.0.0.1 -n 2 >nul & del /f /q \"$selfScript\"" -WindowStyle Hidden | Out-Null
 """.strip()
 
     fd, ps1_path = tempfile.mkstemp(prefix="wpu_update_", suffix=".ps1")
     try:
+        # UTF-8 con BOM para que PowerShell en Windows respete acentos.
         with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
             f.write(ps_script)
     except Exception:
-        try: os.close(fd)
-        except OSError: pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         return
 
     try:
         subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1_path],
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                ps1_path,
+            ],
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             close_fds=True,
         )
