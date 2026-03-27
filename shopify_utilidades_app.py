@@ -38,6 +38,7 @@ APP_VERSION = "1.0.0"  # <-- actualiza este valor en cada release
 #   "notes": "Descripción de los cambios"
 # }
 _UPDATE_CHECK_URLS = [
+    "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/version.json"
 ]
 
 

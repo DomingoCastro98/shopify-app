@@ -1,0 +1,68 @@
+name: Auto Tag From Version
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from version.json
+        id: version
+        run: |
+          python - << 'PY'
+          import json
+          from pathlib import Path
+
+          p = Path('version.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          raw = str(data.get('version', '')).strip()
+          if not raw:
+              raise SystemExit('version.json no contiene campo "version" válido')
+          tag = f'v{raw.lstrip("v")}'
+
+          with open(Path('.github_tag_output'), 'w', encoding='utf-8') as f:
+              f.write(tag)
+          print(f'Tag detectado: {tag}')
+          PY
+          echo "tag=$(cat .github_tag_output)" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists on remote
+        id: exists
+        run: |
+          git fetch --tags origin
+          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}" | grep -q "refs/tags/${{ steps.version.outputs.tag }}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ya existe: ${{ steps.version.outputs.tag }}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag no existe, se creará: ${{ steps.version.outputs.tag }}"
+          fi
+
+      - name: Create and push tag
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "Falta el secret GH_PAT en el repositorio."
+            echo "Crea un PAT con permiso contents:write y guardalo como GH_PAT."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
