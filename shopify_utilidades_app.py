@@ -27,7 +27,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.6"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.0.7"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
