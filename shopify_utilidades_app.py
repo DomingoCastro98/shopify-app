@@ -27,7 +27,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.7"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.0.9"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -222,17 +222,18 @@ for ($i = 1; $i -le 80; $i++) {{
 }}
 
 if ($copied) {{
-    Set-Ui 95 'Limpiando temporales...'
-    $tempDir = [System.IO.Path]::GetTempPath()
-    Get-ChildItem -Path $tempDir -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue | ForEach-Object {{
-        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    }}
+    # IMPORTANTE: NO borrar carpetas _MEI antes de relanzar el .exe.
+    # PyInstaller extrae la DLL de Python en una carpeta _MEI nueva al arrancar.
+    # Si se borran _MEI* justo antes del relanzamiento, el nuevo proceso puede
+    # encontrar su carpeta a medias o vacía → "Failed to load Python DLL".
+    # Las carpetas _MEI del proceso anterior ya quedaron libres al cerrarlo;
+    # Windows las limpiará en el siguiente arranque o limpieza de temp.
     Remove-Item -LiteralPath $newFile -Force -ErrorAction SilentlyContinue
 
     Set-Ui 100 'Instalación finalizada. Reiniciando aplicación...'
-    Start-Sleep -Milliseconds 3000
-    Remove-Item Env:\_MEIPASS2 -ErrorAction SilentlyContinue
-    Remove-Item Env:\_MEIPASS -ErrorAction SilentlyContinue
+    # Espera generosa para que el SO libere completamente los handles del .exe
+    # anterior antes de que el nuevo proceso intente extraer sus archivos.
+    Start-Sleep -Milliseconds 2000
     try {{
         $workDir = Split-Path -Path $restartExe -Parent
         if ($restartArgs.Count -gt 0) {{
