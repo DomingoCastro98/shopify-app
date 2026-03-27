@@ -27,7 +27,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.1"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.3"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -395,18 +395,35 @@ def _run_helper_cli_from_argv(argv: list[str]) -> int | None:
 
 
 class ShopifyUtilitiesApp:
-    def _cancel_profiles_load_guard(self):
-        pass
+    def _cancel_profiles_load_guard(self) -> None:
+        """Cancela el job de timeout del guard de carga de perfiles si está activo."""
+        if self._profiles_load_guard_job_id is not None:
+            try:
+                self.root.after_cancel(self._profiles_load_guard_job_id)
+            except Exception:
+                pass
+            self._profiles_load_guard_job_id = None
 
-    def _fail_profiles_loading(self, msg=None):
-        pass
+    def _fail_profiles_loading(self, msg: str | None = None) -> None:
+        """Marca la carga de perfiles como fallida y actualiza la UI en el hilo principal."""
+        self._profiles_loading = False
+        self._profiles_loading_scope = None
+        self._profiles_load_job_id = None
+        self._cancel_profiles_load_guard()
+        self._set_profiles_loading_ui(False)
+        if hasattr(self, 'profiles_listbox') and self.profiles_listbox:
+            self.profiles_listbox.configure(state="normal")
+            self.profiles_listbox.delete(0, tk.END)
+            error_text = msg or "Error al cargar perfiles remotos"
+            self.profiles_listbox.insert(tk.END, error_text)
+        self._profiles_remote_backoff_until = time.time() + self._profiles_remote_retry_cooldown_sec
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Utilidades Shopify + Docker")
         self.root.geometry("1280x720")
         self.root.minsize(820, 500)
-        self.root.configure(background="#f1f5f9")
+        self.root.configure(background="#f6f6f7")
 
         self.app_dir = os.path.dirname(os.path.abspath(__file__))
         self.tools_dir = os.path.dirname(self.app_dir)
@@ -435,16 +452,13 @@ class ShopifyUtilitiesApp:
         self.log_lines_var = tk.StringVar(value="100")
         self.log_auto_refresh_var = tk.BooleanVar(value=False)
         self.log_follow_var = tk.BooleanVar(value=False)
-        self.docker_mode = "local"
-        self.docker_host = ""
+        self.docker_mode = "remote"
+        self.docker_host = "tcp://192.168.200.51:2375"
         self.discovered_lan_hosts: list[str] = []
         self.docker_cli_available: bool | None = None
         self.docker_sdk_client: object | None = None
         self._sdk_last_fail_at: float = 0.0
         self._sdk_retry_cooldown_sec: float = 5.0
-        self.last_docker_error_detail = ""
-        self._last_remote_diag_at: float = 0.0
-        self._last_remote_diag_text = ""
         self._docker_last_ready = False
         self._docker_last_checked_at = 0.0
         self._docker_check_in_progress = False
@@ -502,6 +516,11 @@ class ShopifyUtilitiesApp:
         self.spinner_job_id: str | None = None
         self.spinner_index = 0
         self.spinner_base_text = ""
+        # History tab spinner (initialized in _build_history_tab, pre-declared here)
+        self._history_spinner_frame: object = None  # type: ignore[assignment]
+        self._history_spinner_job: str | None = None
+        self._history_spinner_index: int = 0
+        self._history_spinner_dot_label: object = None  # type: ignore[assignment]
         self.docker_status_dot: tk.Label | None = None
         self.connection_mode_badge: tk.Label | None = None
         self.container_action_btns: list[ttk.Button] = []
@@ -563,7 +582,7 @@ class ShopifyUtilitiesApp:
         dlg.geometry("460x300")
         dlg.resizable(False, False)
         dlg.grab_set()
-        dlg.configure(bg="#f1f5f9")
+        dlg.configure(bg="#f6f6f7")
 
         # Centrar sobre la ventana principal
         self.root.update_idletasks()
@@ -575,16 +594,16 @@ class ShopifyUtilitiesApp:
             dlg,
             text=f"🆕  Nueva versión disponible: v{remote_ver}",
             font=("Segoe UI Semibold", 13),
-            bg="#f1f5f9",
-            fg="#0f766e",
+            bg="#f6f6f7",
+            fg="#008060",
         ).pack(pady=(22, 4))
 
         tk.Label(
             dlg,
             text=f"Versión instalada: v{APP_VERSION}",
             font=("Segoe UI", 10),
-            bg="#f1f5f9",
-            fg="#6b7f93",
+            bg="#f6f6f7",
+            fg="#6d7175",
         ).pack()
 
         if notes:
@@ -592,21 +611,21 @@ class ShopifyUtilitiesApp:
                 dlg,
                 text=notes,
                 font=("Segoe UI", 10),
-                bg="#f1f5f9",
-                fg="#365066",
+                bg="#f6f6f7",
+                fg="#6d7175",
                 wraplength=400,
                 justify="center",
             ).pack(pady=(10, 0))
 
         status_var = tk.StringVar(value="")
-        status_lbl = tk.Label(dlg, textvariable=status_var, bg="#f1f5f9", fg="#6b7f93", font=("Segoe UI", 9))
+        status_lbl = tk.Label(dlg, textvariable=status_var, bg="#f6f6f7", fg="#6d7175", font=("Segoe UI", 9))
         status_lbl.pack(pady=(12, 2))
 
         progress_var = tk.DoubleVar(value=0)
         progress_bar = ttk.Progressbar(dlg, variable=progress_var, maximum=100, length=380)
         progress_bar.pack(pady=(0, 14))
 
-        btn_frame = tk.Frame(dlg, bg="#f1f5f9")
+        btn_frame = tk.Frame(dlg, bg="#f6f6f7")
         btn_frame.pack()
 
         update_btn = ttk.Button(btn_frame, text="⬇  Descargar e instalar", style="Accent.TButton")
@@ -773,61 +792,63 @@ class ShopifyUtilitiesApp:
         except tk.TclError:
             pass
 
-        bg        = "#edf3f7"   # main background
+        # ── Shopify Polaris colour tokens ─────────────────────────────────────
+        bg        = "#f6f6f7"   # Polaris surface background
         surface   = "#ffffff"   # card / panel
-        surface2  = "#f5f9fc"   # secondary surface
-        text      = "#0f172a"   # primary text
-        text2     = "#365066"   # secondary text
-        muted     = "#6b7f93"   # muted text
-        accent    = "#0f766e"   # teal-700
-        accent_hv = "#115e59"   # teal-800
-        border    = "#d7e3ec"   # border
-        selected  = "#d1fae5"   # selected rows
+        surface2  = "#f1f2f3"   # secondary surface
+        text      = "#202223"   # Polaris --p-text
+        text2     = "#6d7175"   # Polaris --p-text-subdued
+        muted     = "#8c9196"   # Polaris --p-icon-subdued
+        accent    = "#008060"   # Shopify brand green
+        accent_hv = "#006e52"   # darker green on hover
+        accent_lt = "#e3f1ec"   # light green tint (selected bg)
+        border    = "#c9cccf"   # Polaris --p-border-subdued
+        selected  = "#e3f1ec"   # selected rows (green tint)
 
         style.configure(".", font=("Segoe UI", 10), background=bg, foreground=text)
         style.configure("TFrame", background=bg)
         style.configure("Card.TFrame", background=surface)
         style.configure("TLabel", background=bg, foreground=text)
         style.configure("Surface.TLabel", background=surface, foreground=text)
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 14), background=bg, foreground="#0b2a3f")
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 14), background=bg, foreground="#202223")
         style.configure("Muted.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
 
         style.configure("TNotebook", background=bg, borderwidth=0, tabmargins=(0, 0, 0, 0))
-        style.configure("TNotebook.Tab", padding=(16, 10), background="#e3edf3", foreground=text2, font=("Segoe UI Semibold", 10))
+        style.configure("TNotebook.Tab", padding=(16, 10), background="#e4e5e7", foreground=text2, font=("Segoe UI Semibold", 10))
         style.map(
             "TNotebook.Tab",
-            background=[("selected", surface), ("active", "#d2e4ef")],
+            background=[("selected", surface), ("active", "#d9dbde")],
             foreground=[("selected", accent)],
         )
 
         style.configure(
             "TButton",
             padding=(12, 8),
-            background="#deebf3",
-            foreground="#0f172a",
+            background="#f1f2f3",
+            foreground="#202223",
             borderwidth=1,
             relief="solid",
             bordercolor=border,
         )
         style.map(
             "TButton",
-            background=[("active", "#c8dbe8"), ("pressed", "#aac0d0")],
-            foreground=[("active", "#0f172a")],
+            background=[("active", "#e4e5e7"), ("pressed", "#c9cccf")],
+            foreground=[("active", "#202223")],
             relief=[("active", "solid")],
         )
         style.configure("Accent.TButton", padding=(13, 8), background=accent, foreground="#ffffff", borderwidth=0, relief="flat")
-        style.map("Accent.TButton", background=[("active", accent_hv), ("pressed", "#134e4a")], relief=[("active", "flat")])
+        style.map("Accent.TButton", background=[("active", accent_hv), ("pressed", "#005e47")], relief=[("active", "flat")])
         style.configure("Ghost.TButton", padding=(9, 6), background=bg, foreground=text2, borderwidth=0, relief="flat")
-        style.map("Ghost.TButton", background=[("active", "#dce8f0")], relief=[("active", "flat")])
-        style.configure("Admin.TButton", padding=(10, 7), background="#dce8f0", foreground="#0f172a", borderwidth=1, relief="solid")
-        style.map("Admin.TButton", background=[("active", "#c8dbe8"), ("pressed", "#aac0d0")], foreground=[("active", "#0f172a")])
-        style.configure("Danger.TButton", padding=(10, 7), background="#fee2e2", foreground="#991b1b", borderwidth=1, relief="solid")
-        style.map("Danger.TButton", background=[("active", "#fecaca"), ("pressed", "#fca5a5")], foreground=[("active", "#7f1d1d")])
+        style.map("Ghost.TButton", background=[("active", "#e4e5e7")], relief=[("active", "flat")])
+        style.configure("Admin.TButton", padding=(10, 7), background="#f1f2f3", foreground="#202223", borderwidth=1, relief="solid")
+        style.map("Admin.TButton", background=[("active", "#e4e5e7"), ("pressed", "#c9cccf")], foreground=[("active", "#202223")])
+        style.configure("Danger.TButton", padding=(10, 7), background="#fff4f4", foreground="#d82c0d", borderwidth=1, relief="solid")
+        style.map("Danger.TButton", background=[("active", "#fed3d1"), ("pressed", "#fead9a")], foreground=[("active", "#bc0f0f")])
 
         style.configure("TLabelframe", background=bg, borderwidth=1, relief="solid", bordercolor=border)
         style.configure("TLabelframe.Label", background=bg, foreground=accent, font=("Segoe UI Semibold", 10))
 
-        style.configure("TEntry", fieldbackground=surface, bordercolor=border, insertcolor="#0b2a3f")
+        style.configure("TEntry", fieldbackground=surface, bordercolor=border, insertcolor="#202223")
         style.configure("TCombobox", fieldbackground=surface, bordercolor=border)
         style.map(
             "TCombobox",
@@ -839,8 +860,8 @@ class ShopifyUtilitiesApp:
 
         style.configure("Horizontal.TProgressbar", troughcolor=border, background=accent, borderwidth=0, thickness=8)
 
-        style.configure("TScrollbar", troughcolor=surface2, background="#c4d5e2", relief="flat", arrowsize=13)
-        style.map("TScrollbar", background=[("active", "#90a7bb")])
+        style.configure("TScrollbar", troughcolor=surface2, background="#c9cccf", relief="flat", arrowsize=13)
+        style.map("TScrollbar", background=[("active", "#8c9196")])
 
         style.configure(
             "Treeview",
@@ -865,11 +886,11 @@ class ShopifyUtilitiesApp:
         style.configure("TCheckbutton", background=bg, foreground=text)
 
     def _build_ui(self) -> None:
-        _SB  = "#0b2537"   # sidebar background
-        _SBH = "#123347"   # sidebar hover
-        _SHD = "#081b2a"   # sidebar header
-        _FG  = "#d6e4ee"   # sidebar foreground
-        _FGM = "#7d95a8"   # sidebar muted foreground
+        _SB  = "#1a1a1a"   # Shopify Admin sidebar background
+        _SBH = "#2c2c2c"   # sidebar hover
+        _SHD = "#0d0d0d"   # sidebar header
+        _FG  = "#e3e3e3"   # sidebar foreground
+        _FGM = "#888888"   # sidebar muted foreground
 
         self.root.columnconfigure(0, weight=0)
         self.root.columnconfigure(1, weight=1)
@@ -881,16 +902,23 @@ class ShopifyUtilitiesApp:
         sidebar.grid_propagate(False)
         self.sidebar_frame = sidebar
 
-        # Logo area
-        logo_f = tk.Frame(sidebar, bg=_SHD, padx=18, pady=18)
+        # Logo area — Shopify brand
+        logo_f = tk.Frame(sidebar, bg=_SHD, padx=18, pady=16)
         logo_f.pack(fill="x")
-        self.sidebar_logo_title_label = tk.Label(logo_f, text="\u2726  Shopify", fg="#93c5fd", bg=_SHD,
-                             font=("Segoe UI Semibold", 14))
+        # Shopify bag icon (Unicode shopping bag) + brand name
+        icon_row = tk.Frame(logo_f, bg=_SHD)
+        icon_row.pack(anchor="w", fill="x")
+        tk.Label(icon_row, text="\U0001f6cd", fg="#95bf47", bg=_SHD,
+                 font=("Segoe UI", 18)).pack(side="left")
+        title_col = tk.Frame(icon_row, bg=_SHD)
+        title_col.pack(side="left", padx=(8, 0))
+        self.sidebar_logo_title_label = tk.Label(title_col, text="Shopify", fg="#ffffff", bg=_SHD,
+                             font=("Segoe UI Semibold", 13))
         self.sidebar_logo_title_label.pack(anchor="w")
-        self.sidebar_logo_subtitle_label = tk.Label(logo_f, text="Docker Tools", fg="#88a0b2", bg=_SHD,
-                                font=("Segoe UI", 9))
-        self.sidebar_logo_subtitle_label.pack(anchor="w", pady=(3, 0))
-        tk.Frame(logo_f, bg="#14b8a6", height=2).pack(fill="x", pady=(14, 0))
+        self.sidebar_logo_subtitle_label = tk.Label(title_col, text="Docker Utilities", fg="#aaaaaa", bg=_SHD,
+                                font=("Segoe UI", 8))
+        self.sidebar_logo_subtitle_label.pack(anchor="w")
+        tk.Frame(logo_f, bg="#95bf47", height=2).pack(fill="x", pady=(14, 0))
 
         # Navigation buttons
         nav_items = [
@@ -932,7 +960,7 @@ class ShopifyUtilitiesApp:
         self.sidebar_shortcuts_label.pack(fill="x")
 
         # Separator
-        tk.Frame(sidebar, bg="#1f3e54", height=1).pack(fill="x", padx=16, pady=(12, 6))
+        tk.Frame(sidebar, bg="#333333", height=1).pack(fill="x", padx=16, pady=(12, 6))
 
         # Close button
         quit_b = tk.Button(
@@ -952,13 +980,13 @@ class ShopifyUtilitiesApp:
         status_f.pack(side="bottom", fill="x")
         dot_row = tk.Frame(status_f, bg=_SHD)
         dot_row.pack(fill="x")
-        self.docker_status_dot = tk.Label(dot_row, text="\u25cf", fg="#7d95a8", bg=_SHD,
+        self.docker_status_dot = tk.Label(dot_row, text="\u25cf", fg="#888888", bg=_SHD,
                                           font=("Segoe UI", 12))
         self.docker_status_dot.pack(side="left")
         self.sidebar_status_label = tk.Label(
             dot_row,
             textvariable=self.status_var,
-            fg="#88a0b2",
+            fg="#aaaaaa",
             bg=_SHD,
             font=("Segoe UI", 9),
             wraplength=160,
@@ -967,7 +995,7 @@ class ShopifyUtilitiesApp:
         self.sidebar_status_label.pack(side="left", padx=(6, 0))
 
         # ── Main content area ────────────────────────────────────────────────
-        main = tk.Frame(self.root, bg="#edf3f7")
+        main = tk.Frame(self.root, bg="#f6f6f7")
         main.grid(row=0, column=1, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)
@@ -975,20 +1003,21 @@ class ShopifyUtilitiesApp:
         # Header bar (white strip with title + refresh timestamp)
         hdr = tk.Frame(main, bg="#ffffff", padx=22, pady=14)
         hdr.grid(row=0, column=0, sticky="ew")
-        tk.Label(hdr, text="Panel de control", fg="#0b2a3f", bg="#ffffff",
+        tk.Label(hdr, text="Panel de control", fg="#202223", bg="#ffffff",
                  font=("Segoe UI Semibold", 15)).pack(side="left")
         tk.Label(
             hdr,
-            text=f"Version: {APP_VERSION}",
-            fg="#6b7f93",
-            bg="#ffffff",
-            font=("Segoe UI", 9),
+            text=f"v{APP_VERSION}",
+            fg="#6d7175",
+            bg="#f1f2f3",
+            font=("Segoe UI", 8),
+            padx=6, pady=2,
         ).pack(side="left", padx=(10, 0))
         self.connection_mode_badge = tk.Label(
             hdr,
             textvariable=self.connection_mode_var,
-            fg="#0f4b47",
-            bg="#d1fae5",
+            fg="#ffffff",
+            bg="#008060",
             font=("Segoe UI Semibold", 9),
             padx=8,
             pady=3,
@@ -1000,11 +1029,11 @@ class ShopifyUtilitiesApp:
             style="Ghost.TButton",
             command=self.change_connection_mode,
         ).pack(side="right", padx=(0, 12))
-        tk.Label(hdr, textvariable=self.last_refresh_var, fg="#6b7f93", bg="#ffffff",
+        tk.Label(hdr, textvariable=self.last_refresh_var, fg="#6d7175", bg="#ffffff",
                  font=("Segoe UI", 9)).pack(side="right")
 
         # Thin separator under header
-        tk.Frame(main, bg="#e2e8f0", height=1).grid(row=1, column=0, sticky="ew")
+        tk.Frame(main, bg="#c9cccf", height=1).grid(row=1, column=0, sticky="ew")
 
         # Notebook wrapper
         nb_wrap = ttk.Frame(main, padding=(16, 12))
@@ -1056,7 +1085,7 @@ class ShopifyUtilitiesApp:
 
         canvas = tk.Canvas(
             host,
-            background="#edf3f7",
+            background="#f6f6f7",
             borderwidth=0,
             highlightthickness=0,
             relief="flat",
@@ -1209,15 +1238,17 @@ class ShopifyUtilitiesApp:
             messagebox.showwarning("Contenedores", "Nombre nuevo no válido.")
             return
 
-        code, _, err = self._run(["docker", "rename", container, new_name])
-        if code != 0:
-            messagebox.showerror("Contenedores", err or "No se pudo renombrar el contenedor.")
-            return
+        def _rename_container_operation():
+            code, _, err = self._run(["docker", "rename", container, new_name])
+            if code != 0:
+                raise RuntimeError(err or "No se pudo renombrar el contenedor.")
 
-        self.log_event("CONTAINER", container, "OK", f"Renombrado a {new_name}")
-        self.refresh_everything()
-        self._refresh_container_admin_table()
-        messagebox.showinfo("Contenedores", f"Contenedor renombrado: {container} -> {new_name}")
+            self.log_event("CONTAINER", container, "OK", f"Renombrado a {new_name}")
+            self.refresh_everything()
+            self._refresh_container_admin_table()
+            return True
+        
+        self._run_with_loading_modal(f"Renombrando contenedor {container} a {new_name}", _rename_container_operation)
 
     def _delete_container_admin(self) -> None:
         container = self._selected_container_admin()
@@ -1259,17 +1290,19 @@ class ShopifyUtilitiesApp:
         if not messagebox.askyesno("Contenedores", f"Eliminar contenedor '{container}'?\n\nSe forzará parada si está arrancado."):
             return
 
-        code, out, err = self._run(["docker", "rm", "-f", container])
-        if code != 0:
-            details = err or out or f"Docker devolvio codigo {code} sin detalle."
-            messagebox.showerror("Contenedores", f"No se pudo borrar el contenedor.\n\n{details}")
-            return
+        def _delete_container_operation():
+            code, out, err = self._run(["docker", "rm", "-f", container])
+            if code != 0:
+                details = err or out or f"Docker devolvio codigo {code} sin detalle."
+                raise RuntimeError(f"No se pudo borrar el contenedor.\n\n{details}")
 
-        self.log_event("CONTAINER", container, "OK", "Eliminado desde gestor avanzado")
-        self.refresh_everything()
-        self.refresh_profiles_ui(force=True)
-        self._refresh_container_admin_table()
-        messagebox.showinfo("Contenedores", f"Contenedor eliminado: {container}")
+            self.log_event("CONTAINER", container, "OK", "Eliminado desde gestor avanzado")
+            self.refresh_everything()
+            self.refresh_profiles_ui(force=True)
+            self._refresh_container_admin_table()
+            return True
+        
+        self._run_with_loading_modal(f"Eliminando contenedor {container}", _delete_container_operation)
 
     def _toggle_container_admin(self, mode: str) -> None:
         container = self._selected_container_admin()
@@ -1709,8 +1742,14 @@ class ShopifyUtilitiesApp:
         ttk.Button(top, text="Limpiar filtro", command=self.clear_history_filters).grid(row=0, column=5, padx=(0, 6))
         ttk.Button(top, text="Copiar visible", command=self.copy_visible_history).grid(row=0, column=6)
 
-        body = ttk.Frame(parent)
-        body.grid(row=1, column=0, sticky="nsew")
+        # Body: text widget + spinner overlay stacked in a container
+        body_container = ttk.Frame(parent)
+        body_container.grid(row=1, column=0, sticky="nsew")
+        body_container.columnconfigure(0, weight=1)
+        body_container.rowconfigure(0, weight=1)
+
+        body = ttk.Frame(body_container)
+        body.grid(row=0, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
 
@@ -1719,12 +1758,13 @@ class ShopifyUtilitiesApp:
             wrap="none",
             height=16,
             bg="#ffffff",
-            fg="#1f2937",
-            insertbackground="#1f2937",
+            fg="#202223",
+            insertbackground="#202223",
             relief="flat",
             borderwidth=1,
-            selectbackground="#bfdbfe",
+            selectbackground="#e3f1ec",
             highlightthickness=0,
+            font=("Segoe UI", 9),
         )
         self.history_text.grid(row=0, column=0, sticky="nsew")
 
@@ -1737,6 +1777,31 @@ class ShopifyUtilitiesApp:
         self.history_text.configure(xscrollcommand=x_scroll.set)
 
         self.history_text.configure(state="disabled")
+
+        # ── Spinner overlay (visible solo mientras carga) ──────────────────
+        self._history_spinner_frame: tk.Frame = tk.Frame(body_container, bg="#ffffff")
+        self._history_spinner_job: str | None = None
+        self._history_spinner_index: int = 0
+
+        spinner_inner = tk.Frame(self._history_spinner_frame, bg="#ffffff")
+        spinner_inner.place(relx=0.5, rely=0.45, anchor="center")
+
+        self._history_spinner_dot_label = tk.Label(
+            spinner_inner,
+            text="⬤",
+            fg="#008060",
+            bg="#ffffff",
+            font=("Segoe UI", 22),
+        )
+        self._history_spinner_dot_label.pack()
+
+        tk.Label(
+            spinner_inner,
+            text="Cargando historial...",
+            fg="#6d7175",
+            bg="#ffffff",
+            font=("Segoe UI", 10),
+        ).pack(pady=(6, 0))
 
     def _build_logs_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -2874,15 +2939,50 @@ class ShopifyUtilitiesApp:
         self.history_text.insert("1.0", message)
         self.history_text.configure(state="disabled")
 
+    def _show_history_loading_spinner(self) -> None:
+        """Muestra el overlay spinner sobre el historial y lanza la animación."""
+        if not hasattr(self, "_history_spinner_frame"):
+            return
+        self._history_spinner_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._history_spinner_frame.lift()
+        self._history_spinner_index = 0
+        self._animate_history_spinner()
+
+    def _animate_history_spinner(self) -> None:
+        if not hasattr(self, "_history_spinner_frame"):
+            return
+        if not self._history_spinner_frame.winfo_ismapped():
+            return
+        pulses = ["⬤", "◉", "○", "◉"]
+        idx = self._history_spinner_index % len(pulses)
+        self._history_spinner_dot_label.configure(text=pulses[idx])
+        self._history_spinner_index += 1
+        self._history_spinner_job = self.root.after(220, self._animate_history_spinner)
+
+    def _hide_history_loading_spinner(self) -> None:
+        """Oculta el overlay spinner del historial."""
+        if hasattr(self, "_history_spinner_job") and self._history_spinner_job is not None:
+            try:
+                self.root.after_cancel(self._history_spinner_job)
+            except Exception:
+                pass
+            self._history_spinner_job = None
+        if hasattr(self, "_history_spinner_frame"):
+            self._history_spinner_frame.place_forget()
+
     def _history_refresh_worker(self) -> None:
         try:
-            # Flush pending lines first (works for both local and remote)
-            with self._history_pending_lock:
-                pending = list(self._history_pending_lines)
-                self._history_pending_lines.clear()
+            print(f"[DEBUG] _history_refresh_worker: docker_mode={self.docker_mode}")
 
             if self.docker_mode != "remote":
+                print("[DEBUG] _history_refresh_worker: Using local mode")
                 # LOCAL MODE: write pending lines to local file and read it back
+                # Flush pending lines first
+                with self._history_pending_lock:
+                    pending = list(self._history_pending_lines)
+                    self._history_pending_lines.clear()
+                print(f"[DEBUG] _history_refresh_worker: pending_lines={len(pending)}")
+                
                 if pending:
                     try:
                         os.makedirs(os.path.dirname(self.history_file) or ".", exist_ok=True)
@@ -2902,51 +3002,108 @@ class ShopifyUtilitiesApp:
                 self._history_refresh_queue.put((True, lines))
                 return
 
-            # REMOTE MODE: use Docker volume
-            client = self._get_docker_sdk_client(timeout_seconds=20)
-            if client is None:
-                raise RuntimeError("No se pudo conectar con Docker remoto para historial.")
-            self._ensure_remote_history_volume(client)
-
+            # REMOTE MODE: use Docker volume with direct docker commands
+            print("[DEBUG] _history_refresh_worker: Using remote mode with direct docker")
+            
+            # Flush pending lines JUST BEFORE writing to capture lines added during execution
+            with self._history_pending_lock:
+                pending = list(self._history_pending_lines)
+                self._history_pending_lines.clear()
+            print(f"[DEBUG] _history_refresh_worker: pending_lines={len(pending)}")
+            
+            # Write pending lines first (with retry on failure)
             if pending:
+                print(f"[DEBUG] _history_refresh_worker: Writing {len(pending)} pending lines")
                 batch = "".join(ln + "\n" for ln in pending)
-                client.containers.run(  # type: ignore[union-attr]
-                    "alpine",
-                    command=["sh", "-c", f"printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}"],
-                    remove=True,
-                    labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-batch-write"},
-                    environment={"WPU_BATCH": batch},
-                    volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
-                )
+                print(f"[DEBUG] _history_refresh_worker: Batch content: {repr(batch)}")
+                try:
+                    import subprocess
+                    print("[DEBUG] _history_refresh_worker: Starting docker write command...")
+                    result = subprocess.run([
+                        "docker", "-H", self.docker_host,
+                        "run", "--rm",
+                        "-v", f"{self.remote_history_volume}:/data",
+                        "-e", f"WPU_BATCH={batch}",  # FIX: -e debe ir antes del nombre de la imagen
+                        "alpine", "sh", "-c", f"printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}",
+                    ], capture_output=True, text=True, timeout=30)
+                    print(f"[DEBUG] _history_refresh_worker: Docker write command completed, returncode={result.returncode}")
+                    if result.returncode == 0:
+                        print(f"[DEBUG] _history_refresh_worker: Successfully wrote pending lines")
+                    else:
+                        print(f"[DEBUG] _history_refresh_worker: Error writing: {result.stderr}")
+                        # Re-queue pending lines on failure
+                        with self._history_pending_lock:
+                            self._history_pending_lines.extend(pending)
+                        raise Exception(f"Write failed: {result.stderr}")
+                except subprocess.TimeoutExpired:
+                    print(f"[DEBUG] _history_refresh_worker: Docker write command timed out")
+                    # Re-queue pending lines on timeout
+                    with self._history_pending_lock:
+                        self._history_pending_lines.extend(pending)
+                    raise
+                except Exception as e:
+                    print(f"[DEBUG] _history_refresh_worker: Error writing pending lines: {e}")
+                    raise
 
             # Read the full log
-            data = client.containers.run(  # type: ignore[union-attr]
-                "alpine",
-                command=["sh", "-c", f"cat {self.remote_history_path} 2>/dev/null || true"],
-                remove=True,
-                labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-full-read"},
-                volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
-            )
+            print("[DEBUG] _history_refresh_worker: Reading full log")
+            try:
+                import subprocess
+                print("[DEBUG] _history_refresh_worker: Starting docker read command...")
+                result = subprocess.run([
+                    "docker", "-H", self.docker_host,
+                    "run", "--rm",
+                    "-v", f"{self.remote_history_volume}:/data",
+                    "alpine", "cat", f"{self.remote_history_path}"
+                ], capture_output=True, text=True, timeout=30)
+                print(f"[DEBUG] _history_refresh_worker: Docker read command completed, returncode={result.returncode}")
+                if result.returncode == 0:
+                    data = result.stdout
+                    print(f"[DEBUG] _history_refresh_worker: Direct docker read successful, data length={len(data)}")
+                else:
+                    print(f"[DEBUG] _history_refresh_worker: Error reading: {result.stderr}")
+                    data = ""
+            except Exception as read_error:
+                print(f"[DEBUG] _history_refresh_worker: Error reading log: {read_error}")
+                data = ""
             raw = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
             lines = [ln.rstrip("\n") for ln in raw.splitlines()]
+            # Limpiar líneas vacías y espacios en blanco
+            lines = [ln for ln in lines if ln.strip()]
+            print(f"[DEBUG] _history_refresh_worker: Read {len(lines)} lines (after cleaning)")
+            print(f"[DEBUG] _history_refresh_worker: About to put results in queue")
             self._history_refresh_queue.put((True, lines))
+            print(f"[DEBUG] _history_refresh_worker: Results put in queue successfully")
         except Exception as exc:
+            print(f"[DEBUG] _history_refresh_worker: Exception - {exc}")
             self._history_refresh_queue.put((False, str(exc)))
 
     def _poll_history_refresh_queue(self) -> None:
+        print("[DEBUG] _poll_history_refresh_queue: Checking queue")
         try:
             ok, payload = self._history_refresh_queue.get_nowait()
         except queue.Empty:
+            print("[DEBUG] _poll_history_refresh_queue: Queue empty, scheduling next check")
             self._history_refresh_job_id = self.root.after(100, self._poll_history_refresh_queue)
             return
 
-        self._history_refresh_in_progress = False
-        self._history_refresh_job_id = None
+        print(f"[DEBUG] _poll_history_refresh_queue: Got result from queue: ok={ok}")
 
+        self._history_refresh_in_progress = False
+        self._history_refresh_job_id = None  # FIX: permitir que refresh_history() reinicie el polling en la próxima llamada
+        self._stop_status_spinner()  # Detener el spinner del historial
+        self._hide_history_loading_spinner()  # Ocultar overlay spinner del historial
+
+        # Guardar el estado de solicitud pendiente ANTES de procesar
+        was_requested = self._history_refresh_requested
+        self._history_refresh_requested = False
+        
         if ok:
+            print(f"[DEBUG] _poll_history_refresh_queue: Success with {len(payload) if isinstance(payload, list) else 'unknown'} lines")
             self.history_lines = list(payload) if isinstance(payload, list) else []
             self.apply_history_filter()
         else:
+            print(f"[DEBUG] _poll_history_refresh_queue: Failed - {payload}")
             self.history_lines = []
             detail = str(payload)
             if self.docker_mode == "remote":
@@ -2957,20 +3114,61 @@ class ShopifyUtilitiesApp:
                 )
             else:
                 self._render_history_message(
-                    "No hay registros en el historial local todavia.\n\n"
+                    f"Historial no disponible.\n\n"
                     f"Detalle: {detail}"
                 )
 
-        if self._history_refresh_requested:
-            self._history_refresh_requested = False
-            self.refresh_history()
+        # Reiniciar si había una solicitud PENDIENTE para capturar cualquier cambio reciente
+        # Usar after() para dar tiempo a que las líneas pendientes se acumulen
+        if was_requested:
+            print("[DEBUG] _poll_history_refresh_queue: Scheduling restart in 500ms due to pending request")
+            self.root.after(500, self.refresh_history)
 
     def log_event(self, accion: str, objetivo: str, estado: str, detalle: str) -> None:
         stamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         actor = self.audit_actor
         line = f"[{stamp}] [{estado}] {accion} | {objetivo} | usuario={actor} | {detalle}"
-        with self._history_pending_lock:
-            self._history_pending_lines.append(line)
+        print(f"[DEBUG] log_event: {line}")
+        
+        # Write directly to storage (Docker volume in remote mode, local file otherwise)
+        if self.docker_mode == "remote":
+            try:
+                import subprocess
+                batch = line + "\n"
+                result = subprocess.run([
+                    "docker", "-H", self.docker_host,
+                    "run", "--rm",
+                    "-v", f"{self.remote_history_volume}:/data",
+                    "-e", f"WPU_BATCH={batch}",  # FIX: -e debe ir antes del nombre de la imagen
+                    "alpine", "sh", "-c", f"mkdir -p /data && printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}",
+                ], capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    print(f"[DEBUG] log_event: Directly wrote to Docker volume")
+                else:
+                    print(f"[DEBUG] log_event: Failed to write to Docker: {result.stderr}")
+                    # Fallback to pending lines
+                    with self._history_pending_lock:
+                        self._history_pending_lines.append(line)
+            except Exception as e:
+                print(f"[DEBUG] log_event: Error writing to Docker: {e}")
+                # Fallback to pending lines
+                with self._history_pending_lock:
+                    self._history_pending_lines.append(line)
+        else:
+            # Local mode: write to local file
+            try:
+                os.makedirs(os.path.dirname(self.history_file) or ".", exist_ok=True)
+                with open(self.history_file, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                print(f"[DEBUG] log_event: Wrote to local file")
+            except Exception as e:
+                print(f"[DEBUG] log_event: Error writing to local file: {e}")
+                # Fallback to pending lines
+                with self._history_pending_lock:
+                    self._history_pending_lines.append(line)
+        
+        # Trigger refresh to display the new event
+        self.root.after(100, self.refresh_history)
 
     def docker_ready(self) -> bool:
         now = time.time()
@@ -3112,6 +3310,239 @@ class ShopifyUtilitiesApp:
         if self.spinner_job_id is not None:
             self.root.after_cancel(self.spinner_job_id)
             self.spinner_job_id = None
+        self.status_var.set("Listo")
+
+    def _show_loading_modal(self, message: str) -> tk.Toplevel:
+        """
+        Muestra un modal con spinner animado mientras se ejecuta una operación.
+        El modal tiene tres estados:
+          • En proceso : spinner girando + mensaje de acción
+          • Completado : icono ✔ verde + mensaje de éxito + botón Cerrar
+          • Error      : icono ✘ rojo  + mensaje de error  + botón Cerrar
+        """
+        MODAL_W, MODAL_H = 420, 200
+
+        modal = tk.Toplevel(self.root)
+        modal.title("Procesando...")
+        modal.geometry(f"{MODAL_W}x{MODAL_H}")
+        modal.resizable(False, False)
+        modal.transient(self.root)
+        modal.grab_set()
+        # Impedir cierre manual con la X mientras procesa
+        modal.protocol("WM_DELETE_WINDOW", lambda: None)
+        modal.configure(bg="#f8fafc")
+
+        # ── Centrar sobre la ventana principal ────────────────────────────────
+        self.root.update_idletasks()
+        rx = self.root.winfo_x() + (self.root.winfo_width()  - MODAL_W) // 2
+        ry = self.root.winfo_y() + (self.root.winfo_height() - MODAL_H) // 2
+        modal.geometry(f"{MODAL_W}x{MODAL_H}+{rx}+{ry}")
+
+        # ── Borde superior de color (acento teal) ─────────────────────────────
+        accent_bar = tk.Frame(modal, bg="#0f766e", height=4)
+        accent_bar.pack(fill="x", side="top")
+
+        # ── Contenido principal ───────────────────────────────────────────────
+        content = tk.Frame(modal, bg="#f8fafc")
+        content.pack(fill="both", expand=True, padx=28, pady=18)
+
+        # Icono / spinner  (fila superior)
+        icon_lbl = tk.Label(
+            content,
+            text="",
+            font=("Segoe UI", 28),
+            fg="#14b8a6",
+            bg="#f8fafc",
+        )
+        icon_lbl.grid(row=0, column=0, rowspan=2, padx=(0, 16), sticky="ns")
+
+        # Título de la acción
+        title_lbl = tk.Label(
+            content,
+            text="Ejecutando acción…",
+            font=("Segoe UI Semibold", 11),
+            fg="#0f172a",
+            bg="#f8fafc",
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        )
+        title_lbl.grid(row=0, column=1, sticky="sw", pady=(4, 0))
+
+        # Detalle / mensaje secundario
+        detail_lbl = tk.Label(
+            content,
+            text=message,
+            font=("Segoe UI", 9),
+            fg="#64748b",
+            bg="#f8fafc",
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        )
+        detail_lbl.grid(row=1, column=1, sticky="nw", pady=(2, 0))
+
+        content.columnconfigure(1, weight=1)
+
+        # ── Separador y pie ───────────────────────────────────────────────────
+        sep = ttk.Separator(modal, orient="horizontal")
+        sep.pack(fill="x", padx=0, pady=(0, 0))
+
+        footer = tk.Frame(modal, bg="#f6f6f7", height=46)
+        footer.pack(fill="x", side="bottom")
+        footer.pack_propagate(False)
+
+        close_btn = ttk.Button(
+            footer,
+            text="Cerrar",
+            style="Accent.TButton",
+            command=lambda: _do_close(),
+        )
+        # El botón empieza oculto; aparece al completar
+        close_btn.place(relx=0.5, rely=0.5, anchor="center")
+        close_btn.place_forget()
+
+        # ── Estado interno del modal ──────────────────────────────────────────
+        modal.spinner_label  = icon_lbl
+        modal.title_label    = title_lbl
+        modal.detail_label   = detail_lbl
+        modal.close_btn      = close_btn
+        modal.footer_frame   = footer
+        modal.accent_bar     = accent_bar
+        modal.spinner_index  = 0
+        modal.spinner_job    = None
+        modal._done          = False
+
+        def _do_close():
+            if modal.winfo_exists():
+                if modal.spinner_job:
+                    try:
+                        modal.after_cancel(modal.spinner_job)
+                    except Exception:
+                        pass
+                modal.grab_release()
+                modal.destroy()
+
+        modal._do_close = _do_close
+
+        def animate_spinner():
+            if not modal.winfo_exists() or modal._done:
+                return
+            frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            modal.spinner_label.config(text=frames[modal.spinner_index % len(frames)])
+            modal.spinner_index += 1
+            modal.spinner_job = modal.after(90, animate_spinner)
+
+        animate_spinner()
+        return modal
+
+    def _close_loading_modal(self, modal: tk.Toplevel) -> None:
+        """
+        Marca el modal como 'completado con éxito':
+          • Detiene el spinner
+          • Muestra icono ✔ verde y texto "Acción completada"
+          • Habilita el botón Cerrar
+          • Permite cerrar con la X
+        """
+        if not (modal and modal.winfo_exists()):
+            return
+        modal._done = True
+        if modal.spinner_job:
+            try:
+                modal.after_cancel(modal.spinner_job)
+            except Exception:
+                pass
+            modal.spinner_job = None
+
+        # Actualizar barra de acento a verde
+        try:
+            modal.accent_bar.configure(bg="#16a34a")
+        except Exception:
+            pass
+
+        # Icono de éxito
+        modal.spinner_label.config(text="✔", fg="#16a34a", font=("Segoe UI", 26))
+
+        # Texto principal
+        modal.title_label.config(text="Acción completada", fg="#15803d")
+
+        # Mostrar botón cerrar
+        modal.close_btn.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Permitir cierre manual con la X
+        modal.protocol("WM_DELETE_WINDOW", modal._do_close)
+
+    def _close_loading_modal_error(self, modal: tk.Toplevel, error_msg: str = "") -> None:
+        """
+        Marca el modal como 'fallido':
+          • Detiene el spinner
+          • Muestra icono ✘ rojo y el mensaje de error
+          • Habilita el botón Cerrar
+        """
+        if not (modal and modal.winfo_exists()):
+            return
+        modal._done = True
+        if modal.spinner_job:
+            try:
+                modal.after_cancel(modal.spinner_job)
+            except Exception:
+                pass
+            modal.spinner_job = None
+
+        # Actualizar barra de acento a rojo
+        try:
+            modal.accent_bar.configure(bg="#dc2626")
+        except Exception:
+            pass
+
+        # Icono de error
+        modal.spinner_label.config(text="✘", fg="#dc2626", font=("Segoe UI", 26))
+
+        # Texto principal
+        modal.title_label.config(text="Se produjo un error", fg="#dc2626")
+
+        # Detalle del error (truncado si es muy largo)
+        err_text = (error_msg[:120] + "…") if len(error_msg) > 120 else error_msg
+        modal.detail_label.config(text=err_text or "Operación fallida.", fg="#b91c1c")
+
+        # Mostrar botón cerrar
+        modal.close_btn.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Permitir cierre manual con la X
+        modal.protocol("WM_DELETE_WINDOW", modal._do_close)
+
+    def _run_with_loading_modal(self, message: str, operation_func, *args, **kwargs):
+        """
+        Ejecuta *operation_func* en un hilo secundario mostrando un modal con:
+          • Spinner animado mientras procesa
+          • Estado "Completado" (verde) al terminar con éxito
+          • Estado "Error" (rojo) si lanza excepción o devuelve False
+        El usuario debe pulsar "Cerrar" para descartar el modal.
+        Los messagebox de éxito/error dentro de operation_func siguen funcionando
+        con normalidad; se muestran *antes* de que el modal cambie de estado.
+        """
+        modal = self._show_loading_modal(message)
+
+        def execute_operation():
+            success = True
+            err_msg = ""
+            try:
+                result = operation_func(*args, **kwargs)
+                # Considerar False explícito como fallo (convenio existente)
+                if result is False:
+                    success = False
+                    err_msg = "La operación no se completó correctamente."
+            except Exception as exc:
+                success = False
+                err_msg = str(exc)
+
+            # Actualizar el modal en el hilo principal
+            if success:
+                self.root.after(0, lambda: self._close_loading_modal(modal))
+            else:
+                self.root.after(0, lambda m=err_msg: self._close_loading_modal_error(modal, m))
+
+        threading.Thread(target=execute_operation, daemon=True).start()
 
     def _selected_tab_widget(self) -> object | None:
         if self.tabs is None:
@@ -3157,6 +3588,18 @@ class ShopifyUtilitiesApp:
         if self.refresh_job_id is not None:
             self.root.after_cancel(self.refresh_job_id)
         self.refresh_job_id = self.root.after(7000, lambda: self.refresh_everything(auto=True))
+
+    def refresh_logs_targets(self) -> None:
+        if not self.container_cache:
+            self.container_cache = self.get_all_container_names()
+        prev = self.log_container_var.get().strip()
+        self.log_container_combo.configure(values=self.container_cache)
+        if prev and prev in self.container_cache:
+            self.log_container_var.set(prev)
+        elif self.container_cache:
+            self.log_container_var.set(self.container_cache[0])
+        else:
+            self.log_container_var.set("")
 
     def get_all_container_names(self) -> list[str]:
         code, out, _ = self._run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.Image}}|{{.Command}}"])
@@ -3978,6 +4421,86 @@ class ShopifyUtilitiesApp:
         if hasattr(self, 'profiles_listbox') and self.profiles_listbox:
             self.profiles_listbox.configure(state="disabled" if loading else "normal")
 
+    # ── Async remote-profiles loading ────────────────────────────────────────
+
+    def _clear_profiles_load_queue(self) -> None:
+        """Vacía cualquier resultado pendiente en la cola de carga de perfiles."""
+        try:
+            while not self._profiles_load_queue.empty():
+                self._profiles_load_queue.get_nowait()
+        except Exception:
+            pass
+
+    def _profiles_load_worker(self, scope: str) -> None:
+        """
+        Ejecutado en un hilo secundario. Lee los perfiles del scope indicado
+        y deposita el resultado en _profiles_load_queue como:
+          ("ok",   True,  profiles_dict)   → éxito
+          ("error",False, error_msg_str)   → fallo
+        """
+        try:
+            profiles = self._read_profiles_for_scope(scope)
+            self._profiles_load_queue.put(("ok", True, profiles))
+        except Exception as exc:
+            self._profiles_load_queue.put(("error", False, str(exc)))
+
+    def _poll_profiles_load_queue(self) -> None:
+        """
+        Ejecutado periódicamente en el hilo principal (via root.after).
+        Comprueba si el worker de carga de perfiles ha terminado y actualiza la UI.
+        """
+        # Si la carga ya no está activa (cancelada externamente), salimos.
+        if not self._profiles_loading:
+            self._profiles_load_job_id = None
+            return
+
+        try:
+            status, ok, payload = self._profiles_load_queue.get_nowait()
+        except queue.Empty:
+            # Todavía está cargando — volver a programar el poll.
+            self._profiles_load_job_id = self.root.after(150, self._poll_profiles_load_queue)
+            return
+
+        # Tenemos resultado.
+        self._profiles_load_job_id = None
+        self._cancel_profiles_load_guard()
+        self._profiles_loading = False
+        scope = self._profiles_loading_scope
+        self._profiles_loading_scope = None
+
+        if status == "ok" and ok:
+            self.profiles_data = payload
+            self._set_profiles_loading_ui(False)
+            if hasattr(self, 'profiles_listbox') and self.profiles_listbox:
+                self.profiles_listbox.configure(state="normal")
+                self.profiles_listbox.delete(0, tk.END)
+                for name in sorted(self.profiles_data.keys(), key=str.lower):
+                    self.profiles_listbox.insert(tk.END, name)
+            self._render_profile_containers()
+            # Si mientras cargaba se pidió un re-refresh, lo lanzamos ahora.
+            if self._profiles_load_requested:
+                self._profiles_load_requested = False
+                self.root.after(100, lambda: self.refresh_profiles_ui(force=True))
+        else:
+            # Error en la carga.
+            error_msg = payload if isinstance(payload, str) else "Error desconocido"
+            self._fail_profiles_loading(f"Error cargando {scope or 'perfiles remotos'}: {error_msg}")
+
+    def _profiles_load_guard_timeout(self) -> None:
+        """
+        Llamado si la carga de perfiles remotos tarda demasiado (timeout).
+        Cancela la operación y muestra un mensaje al usuario.
+        """
+        self._profiles_load_guard_job_id = None
+        if self._profiles_loading:
+            self._fail_profiles_loading(
+                f"Tiempo de espera agotado al cargar perfiles remotos "
+                f"(>{self._profiles_load_timeout_sec}s). "
+                "Comprueba la conexión con Docker remoto y pulsa 'Refrescar'."
+            )
+
+    # ── Fin async remote-profiles loading ────────────────────────────────────
+
     def on_profile_scope_changed(self, _event: object | None = None) -> None:
         self.clear_profile_editor()
         self.refresh_profiles_ui(force=True)
@@ -4583,14 +5106,18 @@ class ShopifyUtilitiesApp:
             return
 
         containers = [self._profile_container_actual_name(self.profile_containers_listbox.get(i)) for i in selected_indexes]
-        self.profiles_data[name] = containers
-        self._write_profiles_for_current_scope(self.profiles_data)
-        scope_name = self._current_profiles_scope().upper()
-        self.log_event(f"PERFIL-{scope_name}", name, "OK", f"Guardado/actualizado: {','.join(containers)}")
-        self.refresh_profiles_ui(force=True)
-        self._select_profile_in_ui(name)
-        self.refresh_history()
-        messagebox.showinfo("Perfiles", f"Perfil guardado: {name}")
+        
+        def _save_profile_operation():
+            self.profiles_data[name] = containers
+            self._write_profiles_for_current_scope(self.profiles_data)
+            scope_name = self._current_profiles_scope().upper()
+            self.log_event(f"PERFIL-{scope_name}", name, "OK", f"Guardado/actualizado: {','.join(containers)}")
+            self.refresh_profiles_ui(force=True)
+            self._select_profile_in_ui(name)
+            self.refresh_history()
+            return True
+        
+        self._run_with_loading_modal(f"Guardando perfil {name}", _save_profile_operation)
 
     def remove_selected_from_profile(self) -> None:
         if self._current_profiles_scope() == "remoto" and self.docker_mode != "remote":
@@ -4681,15 +5208,19 @@ class ShopifyUtilitiesApp:
         if not messagebox.askyesno("Perfiles", f"Eliminar perfil '{name}'?"):
             return
 
-        if name in self.profiles_data:
-            del self.profiles_data[name]
-            self._write_profiles_for_current_scope(self.profiles_data)
-            scope_name = self._current_profiles_scope().upper()
-            self.log_event(f"PERFIL-{scope_name}", name, "OK", "Perfil eliminado")
-            self.refresh_profiles_ui(force=True)
-            self.clear_profile_editor()
-            self.refresh_history()
-            messagebox.showinfo("Perfiles", f"Perfil eliminado: {name}")
+        def _delete_profile_operation():
+            if name in self.profiles_data:
+                del self.profiles_data[name]
+                self._write_profiles_for_current_scope(self.profiles_data)
+                scope_name = self._current_profiles_scope().upper()
+                self.log_event(f"PERFIL-{scope_name}", name, "OK", "Perfil eliminado")
+                self.refresh_profiles_ui(force=True)
+                self.clear_profile_editor()
+                self.refresh_history()
+                return True
+            return False
+        
+        self._run_with_loading_modal(f"Eliminando perfil {name}", _delete_profile_operation)
 
     def run_selected_profile(self, mode: str) -> None:
         selected = self.profiles_listbox.curselection()
@@ -4883,15 +5414,18 @@ class ShopifyUtilitiesApp:
         if not name:
             return
         driver = self.network_driver_var.get().strip() or "bridge"
-        code, _, err = self._run(["docker", "network", "create", "--driver", driver, name.strip()])
-        if code != 0:
-            self.log_event("NETWORK", name.strip(), "ERROR", err or "No se pudo crear")
-            messagebox.showerror("Networks", err or "No se pudo crear la network")
-            return
-        self.log_event("NETWORK", name.strip(), "OK", f"Network creada con driver {driver}")
-        self.refresh_networks()
-        self.refresh_history()
-        messagebox.showinfo("Networks", f"Network creada: {name.strip()} (driver: {driver})")
+        
+        def _create_network_operation():
+            code, _, err = self._run(["docker", "network", "create", "--driver", driver, name.strip()])
+            if code != 0:
+                self.log_event("NETWORK", name.strip(), "ERROR", err or "No se pudo crear")
+                raise RuntimeError(err or "No se pudo crear la network")
+            self.log_event("NETWORK", name.strip(), "OK", f"Network creada con driver {driver}")
+            self.refresh_networks()
+            self.refresh_history()
+            return True
+        
+        self._run_with_loading_modal(f"Creando network {name.strip()}", _create_network_operation)
 
     def delete_network(self) -> None:
         net_name = self.selected_network_name()
@@ -4900,15 +5434,18 @@ class ShopifyUtilitiesApp:
             return
         if not messagebox.askyesno("Networks", f"Eliminar network '{net_name}'?"):
             return
-        code, _, err = self._run(["docker", "network", "rm", net_name])
-        if code != 0:
-            self.log_event("NETWORK", net_name, "ERROR", err or "No se pudo eliminar")
-            messagebox.showerror("Networks", err or "No se pudo eliminar la network")
-            return
-        self.log_event("NETWORK", net_name, "OK", "Network eliminada")
-        self.refresh_networks()
-        self.refresh_history()
-        messagebox.showinfo("Networks", f"Network eliminada: {net_name}")
+        
+        def _delete_network_operation():
+            code, _, err = self._run(["docker", "network", "rm", net_name])
+            if code != 0:
+                self.log_event("NETWORK", net_name, "ERROR", err or "No se pudo eliminar")
+                raise RuntimeError(err or "No se pudo eliminar la network")
+            self.log_event("NETWORK", net_name, "OK", "Network eliminada")
+            self.refresh_networks()
+            self.refresh_history()
+            return True
+        
+        self._run_with_loading_modal(f"Eliminando network {net_name}", _delete_network_operation)
 
     def rename_network(self) -> None:
         old_name = self.selected_network_name()
@@ -4924,31 +5461,29 @@ class ShopifyUtilitiesApp:
             messagebox.showwarning("Networks", "Nombre nuevo no valido.")
             return
 
-        code, _, err = self._run(["docker", "network", "create", new_name])
-        if code != 0:
-            self.log_event("NETWORK", new_name, "ERROR", err or "No se pudo crear nueva network")
-            messagebox.showerror("Networks", err or "No se pudo crear la nueva network")
-            return
+        def _rename_network_operation():
+            code, _, err = self._run(["docker", "network", "create", new_name])
+            if code != 0:
+                self.log_event("NETWORK", new_name, "ERROR", err or "No se pudo crear nueva network")
+                raise RuntimeError(err or "No se pudo crear la nueva network")
 
-        old_containers = self.network_data.get(old_name, {}).get("containers", [])
-        if isinstance(old_containers, list):
-            for cname in old_containers:
-                self._run(["docker", "network", "connect", new_name, cname])
-                self._run(["docker", "network", "disconnect", old_name, cname])
+            old_containers = self.network_data.get(old_name, {}).get("containers", [])
+            if isinstance(old_containers, list):
+                for cname in old_containers:
+                    self._run(["docker", "network", "connect", new_name, cname])
+                    self._run(["docker", "network", "disconnect", old_name, cname])
 
-        code_rm, _, err_rm = self._run(["docker", "network", "rm", old_name])
-        if code_rm != 0:
-            self.log_event("NETWORK", old_name, "WARN", f"Creada {new_name}, no se pudo eliminar original")
-            messagebox.showwarning(
-                "Networks",
-                f"Se creo '{new_name}', pero no se pudo eliminar '{old_name}'.\n\n{err_rm or ''}",
-            )
-        else:
-            self.log_event("NETWORK", old_name, "OK", f"Renombrada a {new_name}")
-            messagebox.showinfo("Networks", f"Network renombrada: {old_name} -> {new_name}")
+            code_rm, _, err_rm = self._run(["docker", "network", "rm", old_name])
+            if code_rm != 0:
+                self.log_event("NETWORK", old_name, "WARN", f"Creada {new_name}, no se pudo eliminar original")
+            else:
+                self.log_event("NETWORK", old_name, "OK", f"Renombrada a {new_name}")
 
-        self.refresh_networks()
-        self.refresh_history()
+            self.refresh_networks()
+            self.refresh_history()
+            return True
+        
+        self._run_with_loading_modal(f"Renombrando network {old_name} a {new_name}", _rename_network_operation)
 
     def connect_container_to_network(self) -> None:
         net_name = self.selected_network_name()
@@ -5175,15 +5710,18 @@ class ShopifyUtilitiesApp:
             messagebox.showwarning("Volumes", "Nombre no valido.")
             return
         driver = self.volume_driver_var.get().strip() or "local"
-        code, _, err = self._run(["docker", "volume", "create", "--driver", driver, name])
-        if code != 0:
-            self.log_event("VOLUME", name, "ERROR", err or "No se pudo crear")
-            messagebox.showerror("Volumes", err or "No se pudo crear el volume")
-            return
-        self.log_event("VOLUME", name, "OK", f"Volume creado con driver {driver}")
-        self.refresh_volumes()
-        self.refresh_history()
-        messagebox.showinfo("Volumes", f"Volume creado: {name} (driver: {driver})")
+        
+        def _create_volume_operation():
+            code, _, err = self._run(["docker", "volume", "create", "--driver", driver, name])
+            if code != 0:
+                self.log_event("VOLUME", name, "ERROR", err or "No se pudo crear")
+                raise RuntimeError(err or "No se pudo crear el volume")
+            self.log_event("VOLUME", name, "OK", f"Volume creado con driver {driver}")
+            self.refresh_volumes()
+            self.refresh_history()
+            return True
+        
+        self._run_with_loading_modal(f"Creando volume {name}", _create_volume_operation)
 
     def inspect_selected_volumes(self) -> None:
         names = self.selected_volume_names()
@@ -5205,30 +5743,31 @@ class ShopifyUtilitiesApp:
         if not messagebox.askyesno("Volumes", f"Eliminar {len(names)} volume(s)?\n\n" + "\n".join(names)):
             return
 
-        errors: list[str] = []
-        ok_names: list[str] = []
-        for name in names:
-            code, _, err = self._run(["docker", "volume", "rm", "-f", name])
-            if code != 0:
-                errors.append(f"{name}: {err or 'error'}")
-            else:
-                ok_names.append(name)
+        def _delete_volumes_operation():
+            errors: list[str] = []
+            ok_names: list[str] = []
+            for name in names:
+                code, _, err = self._run(["docker", "volume", "rm", "-f", name])
+                if code != 0:
+                    errors.append(f"{name}: {err or 'error'}")
+                else:
+                    ok_names.append(name)
 
-        self.refresh_volumes()
-        self.refresh_history()
-        if ok_names:
-            self.log_event("VOLUME", ", ".join(ok_names), "OK", "Volume(s) eliminado(s)")
-        if errors:
-            self.log_event("VOLUME", ", ".join(names), "ERROR", "; ".join(errors))
-            messagebox.showwarning(
-                "Volumes",
-                "Algunas eliminaciones fallaron.\n\n"
-                + (f"Eliminados: {', '.join(ok_names)}\n\n" if ok_names else "")
-                + "Errores:\n"
-                + "\n".join(errors),
-            )
-            return
-        messagebox.showinfo("Volumes", f"Volume(s) eliminados: {', '.join(ok_names)}")
+            self.refresh_volumes()
+            self.refresh_history()
+            if ok_names:
+                self.log_event("VOLUME", ", ".join(ok_names), "OK", "Volume(s) eliminado(s)")
+            if errors:
+                self.log_event("VOLUME", ", ".join(names), "ERROR", "; ".join(errors))
+                raise RuntimeError(
+                    "Algunas eliminaciones fallaron.\n\n"
+                    + (f"Eliminados: {', '.join(ok_names)}\n\n" if ok_names else "")
+                    + "Errores:\n"
+                    + "\n".join(errors),
+                )
+            return True
+        
+        self._run_with_loading_modal(f"Eliminando {len(names)} volume(s)", _delete_volumes_operation)
 
     def prune_volumes(self) -> None:
         if not self.docker_ready():
@@ -5446,27 +5985,30 @@ class ShopifyUtilitiesApp:
         ttk.Button(actions, text="Cerrar", command=dialog.destroy).pack(side="right")
 
     def refresh_history(self) -> None:
-        if not self._is_history_tab_visible():
-            return
+        print("[DEBUG] refresh_history: Called")
+        # Temporal: forzar refresco sin verificar visibilidad para depuración
+        # if not self._is_history_tab_visible():
+        #     return
 
         if self._history_refresh_in_progress:
+            print("[DEBUG] refresh_history: Already in progress, setting requested flag")
             self._history_refresh_requested = True
             return
 
+        print("[DEBUG] refresh_history: Starting refresh worker")
         self._history_refresh_in_progress = True
+        
+        # Mostrar spinner de carga si no hay líneas cargadas aún
+        if not hasattr(self, 'history_lines') or not self.history_lines:
+            self._show_history_loading_spinner()
+        
         threading.Thread(target=self._history_refresh_worker, daemon=True).start()
 
         if self._history_refresh_job_id is None:
+            print("[DEBUG] refresh_history: Starting queue polling")
             self._history_refresh_job_id = self.root.after(100, self._poll_history_refresh_queue)
-
-    def refresh_logs_targets(self) -> None:
-        values = self.container_cache[:]
-        self.log_container_combo.configure(values=values)
-        if values and self.log_container_var.get() not in values:
-            self.log_container_var.set(values[0])
-        if not values:
-            self._stop_follow_logs()
-            self.log_container_var.set("")
+        else:
+            print(f"[DEBUG] refresh_history: Polling already active with job_id={self._history_refresh_job_id}")
 
     def _parse_log_lines(self) -> int:
         raw = self.log_lines_var.get().strip()
@@ -5790,6 +6332,9 @@ class ShopifyUtilitiesApp:
             if token
         ]
 
+        print(f"[DEBUG] apply_history_filter: level={level}, query='{query}', history_lines={len(self.history_lines)}")
+        print(f"[DEBUG] apply_history_filter: history_lines content: {self.history_lines}")
+
         filtered: list[str] = []
         for line in self.history_lines:
             detected_level = self._detect_history_level(line)
@@ -5801,14 +6346,18 @@ class ShopifyUtilitiesApp:
                     continue
             filtered.append(line)
 
+        print(f"[DEBUG] apply_history_filter: filtered={len(filtered)} lines")
+
         x_first, _x_last = self.history_text.xview()
         y_first, _y_last = self.history_text.yview()
 
         self.history_text.configure(state="normal")
         self.history_text.delete("1.0", tk.END)
         if filtered:
+            print(f"[DEBUG] apply_history_filter: Inserting {len(filtered)} lines into text widget")
             self.history_text.insert(tk.END, "\n".join(filtered))
         else:
+            print("[DEBUG] apply_history_filter: No filtered lines, showing 'Sin registros'")
             self.history_text.insert(tk.END, "Sin registros para el filtro actual.")
         self.history_text.xview_moveto(x_first)
         self.history_text.yview_moveto(y_first)
@@ -6948,22 +7497,22 @@ class ShopifyUtilitiesApp:
                 auth_dlg.geometry("520x300")
                 auth_dlg.resizable(False, False)
                 auth_dlg.grab_set()
-                auth_dlg.configure(bg="#f1f5f9")
+                auth_dlg.configure(bg="#f6f6f7")
                 tk.Label(auth_dlg, text="Autenticacion con Shopify", font=("Segoe UI Semibold", 13),
-                         bg="#f1f5f9", fg="#0f766e").pack(pady=(18, 4))
+                         bg="#f6f6f7", fg="#008060").pack(pady=(18, 4))
                 tk.Label(auth_dlg, text=f"Codigo de verificacion:  {auth_code}",
-                         font=("Segoe UI Semibold", 12), bg="#f1f5f9", fg="#0b2a3f").pack(pady=(4, 8))
+                         font=("Segoe UI Semibold", 12), bg="#f6f6f7", fg="#202223").pack(pady=(4, 8))
                 tk.Label(auth_dlg,
                          text="1. Pulsa 'Abrir en navegador' o copia la URL\n"
                               "2. Inicia sesion con tu cuenta Shopify\n"
                               "3. Confirma el codigo mostrado arriba\n"
                               "4. Pulsa 'Continuar' — el tema se descargara automaticamente",
-                         font=("Segoe UI", 10), bg="#f1f5f9", fg="#365066",
+                         font=("Segoe UI", 10), bg="#f6f6f7", fg="#6d7175",
                          justify="left").pack(padx=20, pady=(0, 10))
                 url_var = tk.StringVar(value=auth_url)
                 url_entry = ttk.Entry(auth_dlg, textvariable=url_var, width=60)
                 url_entry.pack(padx=20, pady=(0, 8))
-                btn_f = tk.Frame(auth_dlg, bg="#f1f5f9")
+                btn_f = tk.Frame(auth_dlg, bg="#f6f6f7")
                 btn_f.pack()
 
                 def _open_browser(u: str = auth_url) -> None:
@@ -7674,9 +8223,9 @@ class ShopifyUtilitiesApp:
                 info_dlg.title("Shopify Export — terminal abierta")
                 info_dlg.geometry("500x260")
                 info_dlg.resizable(False, False)
-                info_dlg.configure(bg="#f1f5f9")
+                info_dlg.configure(bg="#f6f6f7")
                 tk.Label(info_dlg, text="Sigue los pasos en la terminal",
-                         font=("Segoe UI Semibold", 13), bg="#f1f5f9", fg="#0f766e").pack(pady=(18, 6))
+                         font=("Segoe UI Semibold", 13), bg="#f6f6f7", fg="#008060").pack(pady=(18, 6))
                 tk.Label(info_dlg,
                          text="Se ha abierto una ventana de terminal.\n\n"
                               "Pasos:\n"
@@ -7686,7 +8235,7 @@ class ShopifyUtilitiesApp:
                               "  4. Cuando la terminal diga 'Descarga finalizada',\n"
                               "     esta app copiara los archivos automaticamente.\n\n"
                               "NO cierres la terminal hasta que termine.",
-                         font=("Segoe UI", 10), bg="#f1f5f9", fg="#365066",
+                         font=("Segoe UI", 10), bg="#f6f6f7", fg="#6d7175",
                          justify="left").pack(padx=20, pady=(0, 14))
                 ttk.Button(info_dlg, text="Entendido", command=info_dlg.destroy).pack()
             elif kind == "done":
@@ -8440,9 +8989,9 @@ try {
                 info_dlg.geometry("500x240")
                 info_dlg.resizable(False, False)
                 info_dlg.grab_set()
-                info_dlg.configure(bg="#f1f5f9")
+                info_dlg.configure(bg="#f6f6f7")
                 tk.Label(info_dlg, text="Sigue los pasos en la terminal",
-                         font=("Segoe UI Semibold", 13), bg="#f1f5f9", fg="#0f766e").pack(pady=(18, 6))
+                         font=("Segoe UI Semibold", 13), bg="#f6f6f7", fg="#008060").pack(pady=(18, 6))
                 tk.Label(info_dlg,
                          text="Se ha abierto una ventana de terminal.\n\n"
                               "Pasos:\n"
@@ -8452,7 +9001,7 @@ try {
                               "  4. Cuando la terminal diga 'Subida finalizada',\n"
                               "     esta app terminara automaticamente.\n\n"
                               "NO cierres la terminal hasta que termine.",
-                         font=("Segoe UI", 10), bg="#f1f5f9", fg="#365066",
+                         font=("Segoe UI", 10), bg="#f6f6f7", fg="#6d7175",
                          justify="left").pack(padx=20, pady=(0, 14))
                 ttk.Button(info_dlg, text="Entendido", command=info_dlg.destroy).pack()
                 info_dlg.wait_window()
@@ -8802,7 +9351,7 @@ try {
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.configure(bg="#f1f5f9")
+        dlg.configure(bg="#f6f6f7")
 
         self.root.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - 560) // 2
@@ -8823,11 +9372,11 @@ try {
         tk.Frame(dlg, bg="#d1d5db", height=1).pack(fill="x", side="bottom")
 
         # ── Cuerpo ────────────────────────────────────────────────────────────
-        body = tk.Frame(dlg, bg="#f1f5f9", padx=20, pady=12)
+        body = tk.Frame(dlg, bg="#f6f6f7", padx=20, pady=12)
         body.pack(fill="both", expand=True, side="top")
 
         tk.Label(body, text="¿Qué va a hacer esta configuración?",
-                 font=("Segoe UI Semibold", 10), bg="#f1f5f9", fg="#0b2a3f").pack(anchor="w", pady=(0, 6))
+                 font=("Segoe UI Semibold", 10), bg="#f6f6f7", fg="#202223").pack(anchor="w", pady=(0, 6))
 
         steps_text = (
             f"1.  Generar clave SSH en tu PC  (si no existe ya)\n"
@@ -8849,16 +9398,16 @@ try {
         hostname_var = tk.StringVar(value=hostname)
         if is_remote:
             tk.Label(body, text="IP del servidor (editable):",
-                     font=("Segoe UI", 9), bg="#f1f5f9", fg="#365066").pack(anchor="w")
+                     font=("Segoe UI", 9), bg="#f6f6f7", fg="#6d7175").pack(anchor="w")
             ttk.Entry(body, textvariable=hostname_var, font=("Consolas", 10)).pack(fill="x", pady=(4, 10))
         else:
             tk.Label(body,
                      text="Modo local detectado → se usará 127.0.0.1",
-                     font=("Segoe UI", 9), bg="#f1f5f9", fg="#059669").pack(anchor="w", pady=(0, 10))
+                     font=("Segoe UI", 9), bg="#f6f6f7", fg="#059669").pack(anchor="w", pady=(0, 10))
 
         # ── Estado y progreso ─────────────────────────────────────────────────
         status_lbl = tk.Label(body, text="", font=("Segoe UI", 9),
-                              bg="#f1f5f9", fg="#0f766e", wraplength=510, justify="left")
+                              bg="#f6f6f7", fg="#008060", wraplength=510, justify="left")
         status_lbl.pack(anchor="w")
 
         log_text = tk.Text(body, height=5, font=("Consolas", 8),
@@ -9045,7 +9594,7 @@ try {
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.configure(bg="#f1f5f9")
+        dlg.configure(bg="#f6f6f7")
 
         self.root.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - 540) // 2
@@ -9076,7 +9625,7 @@ try {
         tk.Frame(dlg, bg="#d1d5db", height=1).pack(fill="x", side="bottom")
 
         # ── Cuerpo ────────────────────────────────────────────────────────────
-        body = tk.Frame(dlg, bg="#f1f5f9", padx=20, pady=12)
+        body = tk.Frame(dlg, bg="#f6f6f7", padx=20, pady=12)
         body.pack(fill="both", expand=True, side="top")
 
         # ── Explicación ───────────────────────────────────────────────────────
@@ -9084,8 +9633,8 @@ try {
             body,
             text="¿Qué va a hacer esta configuración?",
             font=("Segoe UI Semibold", 10),
-            bg="#f1f5f9",
-            fg="#0b2a3f",
+            bg="#f6f6f7",
+            fg="#202223",
         ).pack(anchor="w", pady=(0, 6))
 
         steps_text = (
@@ -9113,8 +9662,8 @@ try {
             body,
             text="Valor de DOCKER_HOST (puedes editarlo):",
             font=("Segoe UI", 9),
-            bg="#f1f5f9",
-            fg="#365066",
+            bg="#f6f6f7",
+            fg="#6d7175",
         ).pack(anchor="w")
 
         dh_var = tk.StringVar(value=dh)
@@ -9133,7 +9682,7 @@ try {
             body,
             text="⚠  Es posible que necesites reiniciar VS Code para que tome el nuevo DOCKER_HOST.",
             font=("Segoe UI", 8),
-            bg="#f1f5f9",
+            bg="#f6f6f7",
             fg="#92400e",
             wraplength=490,
             justify="left",
@@ -9141,7 +9690,7 @@ try {
         restart_note.pack(anchor="w", pady=(0, 4))
 
         result = {"applied": False}
-        status_lbl = tk.Label(body, text="", font=("Segoe UI", 9), bg="#f1f5f9", fg="#059669")
+        status_lbl = tk.Label(body, text="", font=("Segoe UI", 9), bg="#f6f6f7", fg="#059669")
         status_lbl.pack(anchor="w")
 
         # ── Botones (ya declarados arriba, solo definimos las funciones aquí) ──
