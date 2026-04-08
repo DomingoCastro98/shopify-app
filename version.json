@@ -1,8 +1,8 @@
 {
-  "version": "1.1.8",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.8/Shopify_Utilidades.exe",
+  "version": "1.1.9",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.9/Shopify_Utilidades.exe",
   "download_url_py": "",
   "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Se añadió acceso directo a la documentación desde la UI (botón lateral) y atajo global F1 para abrir guia_usuario.html. Se mejoró la apertura de la guía en Windows sin consola intermedia, y se ajustó estabilidad en el refresco de historial remoto/log_event. Incluye además ajustes visuales menores del panel de atajos y navegación."
+  "notes": "Eliminación modo dev con autoconexión a una ip en concreta."
 }

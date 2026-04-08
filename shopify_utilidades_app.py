@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.8"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.9"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -3092,8 +3092,7 @@ class ShopifyUtilitiesApp:
         elif self.discovered_lan_hosts:
             lan_default = self.discovered_lan_hosts[0]
         lan_var = tk.StringVar(value=lan_default)
-        manual_var = tk.StringVar(
-            value=current_host if initial_mode == "remote" else "")
+        manual_var = tk.StringVar(value="")
         result = {"accepted": False}
 
         body = ttk.Frame(dialog, padding=14)
@@ -7943,17 +7942,7 @@ class ShopifyUtilitiesApp:
             messagebox.showerror("Docker", self._docker_unavailable_message())
             return
 
-        default_ip_red = "192.168.200.51"
-        if self.docker_mode == "remote" and self.docker_host:
-            parsed = self._extract_host_port_from_docker_host(self.docker_host)
-            if parsed is not None:
-                host, _port = parsed
-                if host:
-                    default_ip_red = host
-            else:
-                ssh_host = self._extract_ssh_host_from_docker_host(self.docker_host)
-                if ssh_host:
-                    default_ip_red = ssh_host
+        self.discovered_lan_hosts = self._discover_lan_hosts()
 
         window = self._open_or_focus_work_tab("setup", "Crear/Recrear")
         if window is None:
@@ -7973,7 +7962,7 @@ class ShopifyUtilitiesApp:
         dev_port_var = tk.StringVar(value="9292")
         theme_port_var = tk.StringVar(value="3000")
         ssh_port_var = tk.StringVar(value="2222")
-        ip_red_var = tk.StringVar(value=default_ip_red)
+        ip_red_var = tk.StringVar(value=self.discovered_lan_hosts[0] if self.discovered_lan_hosts else "")
         store_url_var = tk.StringVar(value="tu-tienda.myshopify.com")
         # shopify_token_var eliminado, no se usará access token
         theme_name_var = tk.StringVar(value="mi-tema")
@@ -8020,7 +8009,13 @@ class ShopifyUtilitiesApp:
 
         row += 1
         ttk.Label(outer, text="IP en red local:").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(outer, textvariable=ip_red_var).grid(row=row, column=1, sticky="ew", pady=4)
+        ip_combo = ttk.Combobox(
+            outer,
+            textvariable=ip_red_var,
+            values=self.discovered_lan_hosts,
+            state="readonly" if self.discovered_lan_hosts else "normal",
+        )
+        ip_combo.grid(row=row, column=1, sticky="ew", pady=4)
 
         shopify_frame = ttk.LabelFrame(outer, text="Configuracion Shopify")
         row += 1
@@ -8132,6 +8127,10 @@ class ShopifyUtilitiesApp:
                     run_button.configure(state="disabled")
                     status_var.set("Puertos fuera de rango (1-65535).")
                     return
+                if not ip_red_var.get().strip():
+                    run_button.configure(state="disabled")
+                    status_var.set("Selecciona una IP en red local.")
+                    return
                 run_button.configure(state="normal")
                 status_var.set("Completa la configuracion y pulsa Crear/Recrear.")
             except ValueError:
@@ -8140,6 +8139,7 @@ class ShopifyUtilitiesApp:
 
         for var in (dev_port_var, theme_port_var, ssh_port_var):
             var.trace_add("write", refresh_ports_validation)
+        ip_red_var.trace_add("write", refresh_ports_validation)
         refresh_ports_validation()
 
     def _run_setup_from_wizard(
