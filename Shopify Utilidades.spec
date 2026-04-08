@@ -8,6 +8,7 @@ a = Analysis(
     datas=[
         ('docker_bin/docker.exe', 'docker_bin'),
         ('guia_usuario.html', '.'),
+        ('shopify_basket.ico', '.'),
     ] + [],
     hiddenimports=[],
     hookspath=[],
@@ -35,6 +36,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
+    icon=r'C:\Users\domin\Desktop\Shopify_App\shopify-app\shopify_basket.ico',
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,

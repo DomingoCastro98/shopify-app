@@ -29,7 +29,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.6"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.7"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -554,6 +554,14 @@ class ShopifyUtilitiesApp:
     def _apply_app_icon(self) -> None:
         """Configura un icono estilo cesta de Shopify sin depender de archivos externos."""
         try:
+            icon_file = self._find_first_existing(["shopify_basket.ico"])
+            if icon_file and os.path.isfile(icon_file) and sys.platform == "win32":
+                self.root.iconbitmap(icon_file)
+                return
+        except Exception:
+            pass
+
+        try:
             icon = tk.PhotoImage(width=64, height=64)
 
             # Fondo transparente no fiable en todos los WM: usamos fondo claro neutro.
@@ -586,14 +594,15 @@ class ShopifyUtilitiesApp:
         self.root.geometry("1280x720")
         self.root.minsize(820, 500)
         self.root.configure(background="#f6f6f7")
+
+        self.app_dir = os.path.dirname(os.path.abspath(__file__))
+        self.tools_dir = os.path.dirname(self.app_dir)
         self._apply_app_icon()
         try:
             self.root.state("zoomed")
         except tk.TclError:
             self.root.attributes("-zoomed", True)
 
-        self.app_dir = os.path.dirname(os.path.abspath(__file__))
-        self.tools_dir = os.path.dirname(self.app_dir)
         self.profiles_file = os.path.join(self.app_dir, "perfiles_shopify.ini")
         self.private_profiles_dir = os.path.join(os.environ.get("LOCALAPPDATA", self.tools_dir), "ShopifyUtilidades")
         self.private_profiles_file = os.path.join(self.private_profiles_dir, "private_profiles.json")
