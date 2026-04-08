@@ -1,7 +1,8 @@
 {
-  "version": "1.1.4",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.4/Shopify_Utilidades.exe",
+  "version": "1.1.5",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.5/Shopify_Utilidades.exe",
   "download_url_py": "",
+  "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Protección de volumes en prune (detecta y evita borrar *_history_remote y *_profiles_remote); completado wrapper de modal 'Procesando...' para refresh de Networks/Volumes; mejoras en UX de validación de protección; Agregada la opción de listar temas remotos y descargar temas remotos, exportar e improtar multiples temas y marcar como activos al importar para modificar el tema actual en modo local; Otras mejoras visuales y técnicas."
+  "notes": "Mejoras de UX y estabilidad: filtro de contenedores ajustado (principal y gestor avanzado), selección/borrado de tema activo en contenedores Shopify con validaciones de seguridad, protección de volumes críticos en prune, eliminación del acceso Doc script en barra lateral y actualización automática de guia_usuario.html durante update con fallback de descarga al abrir la guía."
 }

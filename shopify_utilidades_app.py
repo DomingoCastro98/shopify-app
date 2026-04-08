@@ -4,6 +4,7 @@ import json
 import math
 import queue
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.4"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.5"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -41,6 +42,7 @@ APP_VERSION = "1.1.4"  # <-- actualiza este valor en cada release
 _UPDATE_CHECK_URLS = [
     "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/version.json"
 ]
+_DEFAULT_GUIDE_URL = "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html"
 
 
 def _is_frozen_app() -> bool:
@@ -74,6 +76,10 @@ def _select_download_url(update_info: dict) -> str:
         or update_info.get("download_url")
         or ""
     )
+
+
+def _select_guide_url(update_info: dict) -> str:
+    return update_info.get("guide_url") or update_info.get("guia_url") or _DEFAULT_GUIDE_URL
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -726,6 +732,7 @@ class ShopifyUtilitiesApp:
         """Muestra una ventana de actualización con progreso de descarga."""
         remote_ver = update_info.get("version", "?")
         download_url = _select_download_url(update_info)
+        guide_url = _select_guide_url(update_info)
         notes = update_info.get("notes", "")
 
         dlg = tk.Toplevel(self.root)
@@ -805,7 +812,7 @@ class ShopifyUtilitiesApp:
             status_var.set("Iniciando descarga...")
             t = threading.Thread(
                 target=self._download_and_apply_update,
-                args=(download_url, dlg, status_var, progress_var, update_btn, skip_btn),
+                args=(download_url, guide_url, dlg, status_var, progress_var, update_btn, skip_btn),
                 daemon=True,
             )
             t.start()
@@ -816,6 +823,7 @@ class ShopifyUtilitiesApp:
     def _download_and_apply_update(
         self,
         url: str,
+        guide_url: str,
         dlg: tk.Toplevel,
         status_var: tk.StringVar,
         progress_var: tk.DoubleVar,
@@ -898,6 +906,35 @@ class ShopifyUtilitiesApp:
 
             ui(lambda: progress_var.set(100))
             ui(lambda: status_var.set("Descarga completada. Aplicando actualización..."))
+
+            # Intentar actualizar la guia de usuario junto con la app.
+            try:
+                if guide_url:
+                    guide_target_dir = os.path.dirname(current_target) or self.app_dir
+                    os.makedirs(guide_target_dir, exist_ok=True)
+                    guide_path = os.path.join(guide_target_dir, "guia_usuario.html")
+                    guide_tmp_fd, guide_tmp_path = tempfile.mkstemp(prefix="wpu_guide_", suffix=".html")
+                    os.close(guide_tmp_fd)
+                    try:
+                        guide_req = urllib.request.Request(
+                            guide_url,
+                            headers={"User-Agent": f"ShopifyUtilidades-GuideUpdater/{APP_VERSION}"},
+                        )
+                        with urllib.request.urlopen(guide_req, timeout=30) as gresp:
+                            content = gresp.read()
+                        if content and len(content) > 200:
+                            with open(guide_tmp_path, "wb") as gfh:
+                                gfh.write(content)
+                            os.replace(guide_tmp_path, guide_path)
+                    finally:
+                        try:
+                            if os.path.exists(guide_tmp_path):
+                                os.remove(guide_tmp_path)
+                        except OSError:
+                            pass
+            except Exception:
+                # No bloquear actualización binaria/script si falla la guía.
+                pass
 
             # Pequeña pausa para que el usuario vea el mensaje
             time.sleep(1.2)
@@ -1093,7 +1130,6 @@ class ShopifyUtilitiesApp:
             ("\u2b06  Exportar theme/datos",       self.open_export_wizard),
             ("\u25b6  Gestionar contenedores",     self.open_containers_manager),
             ("\u2139  Guia de usuario",            self.open_app_docs),
-            ("\u2261  Docs scripts Docker/Shopify", self.open_docs),
         ]
         nav_f = tk.Frame(sidebar, bg=_SB)
         nav_f.pack(fill="x", pady=(6, 0))
@@ -1488,6 +1524,8 @@ class ShopifyUtilitiesApp:
         ttk.Button(actions, text="Borrar", command=self._delete_container_admin, style="Danger.TButton").pack(side="left", padx=6)
         ttk.Button(actions, text="Arrancar", command=lambda: self._toggle_container_admin("start"), style="Admin.TButton").pack(side="left", padx=6)
         ttk.Button(actions, text="Apagar", command=lambda: self._toggle_container_admin("stop"), style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Seleccionar tema activo", command=self._select_active_theme_admin, style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Borrar tema", command=self._delete_theme_admin, style="Danger.TButton").pack(side="left", padx=6)
         ttk.Button(actions, text="Acceso Remoto (SSH)", command=self._remote_access_container_admin, style="Admin.TButton").pack(side="left", padx=6)
 
         self._refresh_container_admin_table()
@@ -1505,9 +1543,10 @@ class ShopifyUtilitiesApp:
             return
 
         if not out.strip():
-            self.container_admin_tree.insert("", "end", values=("(sin contenedores)", "-", "-", "-", "-"))
+            self.container_admin_tree.insert("", "end", values=("(sin contenedores Shopify)", "-", "-", "-", "-"))
             return
 
+        shopify_found = False
         for line in out.splitlines():
             parts = line.split("|", 4)
             if len(parts) < 5:
@@ -1517,15 +1556,22 @@ class ShopifyUtilitiesApp:
             image = parts[2].strip()
             ports = parts[3].strip() or "-"
             command = parts[4].strip()
-            if self._is_hidden_helper_container(name, image, command):
+            service_label = self._container_service_label(name, image)
+            is_running = status_raw.lower().startswith("up")
+            if service_label not in ("Contenedor de Shopify", "Contenedor Shopify Node"):
                 continue
-            state = "ARRANCADO" if status_raw.lower().startswith("up") else "APAGADO"
+            # Filtrar solo contenedores Shopify
+            state = "ARRANCADO" if is_running else "APAGADO"
+            shopify_found = True
             protection = self._container_protection_text(name, image)
             tags: list[str] = []
             service_tag = self._container_service_tag(name, image)
             if service_tag:
                 tags.append(service_tag)
             self.container_admin_tree.insert("", "end", values=(name, state, image, ports, protection), tags=tuple(tags))
+        
+        if not shopify_found:
+            self.container_admin_tree.insert("", "end", values=("(sin contenedores Shopify)", "-", "-", "-", "-"))
 
     def _selected_container_admin(self) -> str | None:
         if self.container_admin_tree is None or not self.container_admin_tree.winfo_exists():
@@ -1537,7 +1583,7 @@ class ShopifyUtilitiesApp:
         if not values:
             return None
         name = str(values[0]).strip()
-        if not name or name == "(sin contenedores)":
+        if not name or name in {"(sin contenedores)", "(sin contenedores Shopify)"}:
             return None
         return name
 
@@ -1628,7 +1674,6 @@ class ShopifyUtilitiesApp:
             return
 
         action = "start" if mode == "start" else "stop"
-        modal = self._show_loading_modal(f"{('Arrancando' if action == 'start' else 'Apagando')} perfil {profile_name}")
         estado = "arrancado" if action == "start" else "apagado"
 
         def _toggle_operation() -> bool:
@@ -1646,6 +1691,20 @@ class ShopifyUtilitiesApp:
             _toggle_operation,
             auto_close_success_ms=500,
         )
+
+    def _select_active_theme_admin(self) -> None:
+        container = self._selected_container_admin()
+        if not container:
+            messagebox.showwarning("Tema activo", "Selecciona un contenedor Shopify.")
+            return
+        self._select_active_theme_for_container(container)
+
+    def _delete_theme_admin(self) -> None:
+        container = self._selected_container_admin()
+        if not container:
+            messagebox.showwarning("Borrar tema", "Selecciona un contenedor Shopify.")
+            return
+        self._delete_theme_for_container(container)
 
     def _remote_access_container_admin(self) -> None:
         container = self._selected_container_admin()
@@ -1790,6 +1849,8 @@ class ShopifyUtilitiesApp:
         for _lbl, _cmd in [
             ("Arrancar seleccionados", self.start_selected),
             ("Apagar seleccionados",   self.stop_selected),
+            ("Seleccionar tema activo", self._select_active_theme_selected),
+            ("Borrar tema", self._delete_theme_selected),
             ("Acceso Remoto (SSH)",   self.remote_access_selected),
             ("Arrancar todos",          self.start_all),
             ("Apagar todos",            self.stop_all),
@@ -4244,8 +4305,12 @@ class ShopifyUtilitiesApp:
             command = parts[4].strip()
             if self._is_hidden_helper_container(name, image, command):
                 continue
+            service_label = self._container_service_label(name, image)
+            is_running = status_raw.lower().startswith("up")
+            if service_label not in ("Contenedor de Shopify", "Contenedor Shopify Node") and not is_running:
+                continue
 
-            state = "ARRANCADO" if status_raw.lower().startswith("up") else "APAGADO"
+            state = "ARRANCADO" if is_running else "APAGADO"
             health = "Sin healthcheck"
             s = status_raw.lower()
             if "unhealthy" in s:
@@ -4350,9 +4415,370 @@ class ShopifyUtilitiesApp:
             if not values:
                 continue
             name = str(values[0])
-            if name and name != "(sin contenedores)" and name not in names:
+            if name and name not in {"(sin contenedores)", "(sin contenedores Shopify)"} and name not in names:
                 names.append(name)
         return names
+
+    def _select_active_theme_for_container(self, container: str) -> None:
+        service_label = self._container_service_label(container, self.container_image_cache.get(container, ""))
+        if service_label not in {"Contenedor de Shopify", "Contenedor Shopify Node"}:
+            messagebox.showwarning("Tema activo", "Solo puedes seleccionar tema activo en contenedores Shopify.")
+            return
+
+        code, running, _ = self._run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        if code != 0 or running.strip().lower() != "true":
+            messagebox.showwarning("Tema activo", f"El contenedor '{container}' debe estar encendido.")
+            return
+
+        themes, err = self._list_container_themes(container)
+        if err:
+            messagebox.showerror("Tema activo", err)
+            return
+        if not themes:
+            messagebox.showwarning("Tema activo", "No se encontraron temas disponibles dentro del contenedor.")
+            return
+
+        current_theme_code, current_theme_out, _ = self._run([
+            "docker", "exec", container, "sh", "-c",
+            "if [ -f /app/.active_theme_name ]; then cat /app/.active_theme_name; elif [ -f /app/.active_theme_dir ]; then basename \"$(cat /app/.active_theme_dir)\"; fi"
+        ])
+        current_theme = current_theme_out.strip() if current_theme_code == 0 else ""
+
+        chooser = tk.Toplevel(self.root)
+        chooser.title(f"Seleccionar tema activo - {container}")
+        chooser.transient(self.root)
+        chooser.grab_set()
+        chooser.resizable(False, False)
+
+        ttk.Label(
+            chooser,
+            text="Selecciona el tema que quieres dejar activo en este contenedor:",
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(14, 8))
+
+        list_frame = ttk.Frame(chooser)
+        list_frame.pack(fill="both", expand=True, padx=14)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
+        theme_listbox = tk.Listbox(
+            list_frame,
+            height=min(12, max(5, len(themes))),
+            exportselection=False,
+            yscrollcommand=scrollbar.set,
+        )
+        scrollbar.config(command=theme_listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        theme_listbox.pack(side="left", fill="both", expand=True)
+
+        selected_index = 0
+        for idx, theme_name in enumerate(themes):
+            theme_listbox.insert(tk.END, theme_name)
+            if current_theme and theme_name == current_theme:
+                selected_index = idx
+        theme_listbox.selection_set(selected_index)
+        theme_listbox.see(selected_index)
+
+        button_row = ttk.Frame(chooser)
+        button_row.pack(fill="x", padx=14, pady=14)
+
+        def close_dialog() -> None:
+            if chooser.winfo_exists():
+                chooser.grab_release()
+                chooser.destroy()
+
+        def apply_theme() -> None:
+            selection = theme_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Tema activo", "Selecciona un tema de la lista.")
+                return
+
+            theme_name = themes[selection[0]]
+            theme_path = f"/app/{theme_name}"
+            safe_theme_name = (
+                theme_name.replace("\\", "\\\\")
+                .replace("&", "\\&")
+                .replace("|", "\\|")
+                .replace('"', '\\"')
+            )
+
+            def _apply_operation() -> bool:
+                set_cmd = (
+                    f"printf '%s' '{theme_name}' > /app/.active_theme_name && "
+                    f"printf '%s' '{theme_path}' > /app/.active_theme_dir && "
+                    "if [ -f /app/entrypoint.sh ]; then "
+                    f"sed -i 's|^THEME_NAME=.*$|THEME_NAME={safe_theme_name}|' /app/entrypoint.sh && "
+                    f"sed -i 's|^THEME_DIR=.*$|THEME_DIR={theme_path}|' /app/entrypoint.sh && "
+                    "chmod +x /app/entrypoint.sh; "
+                    "fi"
+                )
+                code_set, _, err_set = self._run(["docker", "exec", "-u", "root", container, "sh", "-c", set_cmd])
+                if code_set != 0:
+                    raise RuntimeError(err_set or "No se pudo guardar el tema activo.")
+
+                code_restart, _, err_restart = self._run(["docker", "restart", container])
+                if code_restart != 0:
+                    raise RuntimeError(err_restart or "No se pudo reiniciar el contenedor para aplicar el tema activo.")
+
+                self.log_event("THEME", container, "OK", f"Tema activo seleccionado: {theme_name}")
+                self.refresh_everything()
+                self._refresh_container_admin_table()
+                messagebox.showinfo("Tema activo", f"Tema activo actualizado a '{theme_name}' en {container}.")
+                return True
+
+            close_dialog()
+            self._run_with_loading_modal(
+                f"Estableciendo tema activo {theme_name}",
+                _apply_operation,
+                auto_close_success_ms=500,
+            )
+
+        ttk.Button(button_row, text="Cancelar", command=close_dialog).pack(side="right")
+        ttk.Button(button_row, text="Seleccionar", command=apply_theme, style="Admin.TButton").pack(side="right", padx=(0, 8))
+
+        chooser.bind("<Escape>", lambda _event: close_dialog())
+        chooser.bind("<Return>", lambda _event: apply_theme())
+
+    def _list_container_themes(self, container: str) -> tuple[list[str], str]:
+        list_cmd = (
+            "for base in /app /workspace /theme /themes; do "
+            "if [ -d \"$base\" ]; then "
+            "find \"$base\" -mindepth 1 -maxdepth 3 -type f -path \"*/config/settings_schema.json\" 2>/dev/null | "
+            "while read -r schema; do root=$(dirname \"$(dirname \"$schema\")\"); "
+            "name=$(basename \"$root\"); [ -n \"$name\" ] && printf \"%s\\n\" \"$name\"; done; "
+            "fi; done | grep -v '^node_modules$' | grep -v '^tmp$' | grep -v '^dist$' | sort -u"
+        )
+        code, out, err = self._run(["docker", "exec", container, "sh", "-c", list_cmd])
+        if code != 0:
+            return [], err or "No se pudieron listar temas del contenedor."
+        themes = [line.strip() for line in out.splitlines() if line.strip()]
+        return themes, ""
+
+    def _delete_theme_for_container(self, container: str) -> None:
+        service_label = self._container_service_label(container, self.container_image_cache.get(container, ""))
+        if service_label not in {"Contenedor de Shopify", "Contenedor Shopify Node"}:
+            messagebox.showwarning("Borrar tema", "Solo puedes borrar temas en contenedores Shopify.")
+            return
+
+        code, running, _ = self._run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        if code != 0 or running.strip().lower() != "true":
+            messagebox.showwarning("Borrar tema", f"El contenedor '{container}' debe estar encendido.")
+            return
+
+        themes, err = self._list_container_themes(container)
+        if err:
+            messagebox.showerror("Borrar tema", err)
+            return
+        if not themes:
+            messagebox.showwarning("Borrar tema", "No se encontraron temas disponibles dentro del contenedor.")
+            return
+
+        current_theme_code, current_theme_out, _ = self._run([
+            "docker", "exec", container, "sh", "-c",
+            "if [ -f /app/.active_theme_name ]; then cat /app/.active_theme_name; elif [ -f /app/.active_theme_dir ]; then basename \"$(cat /app/.active_theme_dir)\"; fi"
+        ])
+        current_theme = current_theme_out.strip() if current_theme_code == 0 else ""
+
+        chooser = tk.Toplevel(self.root)
+        chooser.title(f"Borrar tema - {container}")
+        chooser.transient(self.root)
+        chooser.grab_set()
+        chooser.resizable(False, False)
+
+        ttk.Label(
+            chooser,
+            text="Selecciona el tema que quieres eliminar de este contenedor:",
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(14, 8))
+
+        list_frame = ttk.Frame(chooser)
+        list_frame.pack(fill="both", expand=True, padx=14)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
+        theme_listbox = tk.Listbox(
+            list_frame,
+            height=min(12, max(5, len(themes))),
+            exportselection=False,
+            yscrollcommand=scrollbar.set,
+        )
+        scrollbar.config(command=theme_listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        theme_listbox.pack(side="left", fill="both", expand=True)
+
+        selected_index = 0
+        for idx, theme_name in enumerate(themes):
+            theme_listbox.insert(tk.END, theme_name)
+            if current_theme and theme_name == current_theme:
+                selected_index = idx
+        theme_listbox.selection_set(selected_index)
+        theme_listbox.see(selected_index)
+
+        button_row = ttk.Frame(chooser)
+        button_row.pack(fill="x", padx=14, pady=14)
+
+        def close_dialog() -> None:
+            if chooser.winfo_exists():
+                chooser.grab_release()
+                chooser.destroy()
+
+        def delete_theme() -> None:
+            selection = theme_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Borrar tema", "Selecciona un tema de la lista.")
+                return
+
+            theme_name = themes[selection[0]]
+            theme_path = f"/app/{theme_name}"
+            safe_theme_name = shlex.quote(theme_name)
+            safe_theme_path = shlex.quote(theme_path)
+            replacement_theme = ""
+
+            def choose_replacement_theme(options: list[str]) -> str | None:
+                chooser2 = tk.Toplevel(self.root)
+                chooser2.title(f"Elegir reemplazo - {container}")
+                chooser2.transient(self.root)
+                chooser2.grab_set()
+                chooser2.resizable(False, False)
+
+                ttk.Label(
+                    chooser2,
+                    text=(
+                        f"El tema '{theme_name}' es el activo actual.\n"
+                        "Selecciona el tema que quieres activar antes de borrarlo:"
+                    ),
+                    wraplength=420,
+                    justify="left",
+                ).pack(anchor="w", padx=14, pady=(14, 8))
+
+                frame2 = ttk.Frame(chooser2)
+                frame2.pack(fill="both", expand=True, padx=14)
+
+                scroll2 = ttk.Scrollbar(frame2, orient="vertical")
+                listbox2 = tk.Listbox(
+                    frame2,
+                    height=min(12, max(5, len(options))),
+                    exportselection=False,
+                    yscrollcommand=scroll2.set,
+                )
+                scroll2.config(command=listbox2.yview)
+                scroll2.pack(side="right", fill="y")
+                listbox2.pack(side="left", fill="both", expand=True)
+
+                for option in options:
+                    listbox2.insert(tk.END, option)
+                listbox2.selection_set(0)
+                listbox2.see(0)
+
+                selected = {"value": None}
+
+                def close2() -> None:
+                    if chooser2.winfo_exists():
+                        chooser2.grab_release()
+                        chooser2.destroy()
+
+                def accept2() -> None:
+                    cur = listbox2.curselection()
+                    if not cur:
+                        messagebox.showwarning("Tema activo", "Selecciona un tema de reemplazo.")
+                        return
+                    selected["value"] = options[cur[0]]
+                    close2()
+
+                btn_row2 = ttk.Frame(chooser2)
+                btn_row2.pack(fill="x", padx=14, pady=14)
+                ttk.Button(btn_row2, text="Cancelar", command=close2).pack(side="right")
+                ttk.Button(btn_row2, text="Usar como activo", command=accept2, style="Admin.TButton").pack(side="right", padx=(0, 8))
+                chooser2.bind("<Escape>", lambda _event: close2())
+                chooser2.bind("<Return>", lambda _event: accept2())
+
+                self.root.wait_window(chooser2)
+                return selected["value"]
+
+            remaining_themes = [item for item in themes if item != theme_name]
+            current_theme_name = current_theme
+            if current_theme_name == theme_name and remaining_themes:
+                replacement_theme = choose_replacement_theme(remaining_themes) or ""
+                if not replacement_theme:
+                    return
+
+            if not messagebox.askyesno(
+                "Confirmar borrado",
+                f"Vas a eliminar el tema '{theme_name}' del contenedor '{container}'.\n\nEsta acción no se puede deshacer.",
+            ):
+                return
+
+            def _delete_operation() -> bool:
+                delete_cmd = f"rm -rf {safe_theme_path}"
+                code_rm, _, err_rm = self._run(["docker", "exec", "-u", "root", container, "sh", "-c", delete_cmd])
+                if code_rm != 0:
+                    raise RuntimeError(err_rm or "No se pudo borrar el tema.")
+
+                if current_theme_name == theme_name:
+                    if replacement_theme:
+                        next_theme = replacement_theme
+                        next_path = f"/app/{next_theme}"
+                        next_theme_q = shlex.quote(next_theme)
+                        next_path_q = shlex.quote(next_path)
+                        safe_next_theme_name = next_theme.replace("\\", "\\\\").replace("&", "\\&").replace("|", "\\|").replace('"', '\\"')
+                        update_cmd = (
+                            f"printf '%s' {next_theme_q} > /app/.active_theme_name && "
+                            f"printf '%s' {next_path_q} > /app/.active_theme_dir && "
+                            "if [ -f /app/entrypoint.sh ]; then "
+                            f"sed -i 's|^THEME_NAME=.*$|THEME_NAME={safe_next_theme_name}|' /app/entrypoint.sh && "
+                            f"sed -i 's|^THEME_DIR=.*$|THEME_DIR={next_path}|' /app/entrypoint.sh && "
+                            "chmod +x /app/entrypoint.sh; "
+                            "fi"
+                        )
+                        code_upd, _, err_upd = self._run(["docker", "exec", "-u", "root", container, "sh", "-c", update_cmd])
+                        if code_upd != 0:
+                            raise RuntimeError(err_upd or "Se borro el tema, pero no se pudo activar otro tema.")
+                    else:
+                        clear_cmd = "rm -f /app/.active_theme_name /app/.active_theme_dir"
+                        self._run(["docker", "exec", "-u", "root", container, "sh", "-c", clear_cmd])
+
+                code_restart, _, err_restart = self._run(["docker", "restart", container])
+                if code_restart != 0:
+                    raise RuntimeError(err_restart or "No se pudo reiniciar el contenedor tras borrar el tema.")
+
+                self.log_event("THEME", container, "OK", f"Tema borrado: {theme_name}")
+                self.refresh_everything()
+                self._refresh_container_admin_table()
+                messagebox.showinfo("Borrar tema", f"Tema '{theme_name}' eliminado de {container}.")
+                return True
+
+            close_dialog()
+            self._run_with_loading_modal(
+                f"Borrando tema {theme_name}",
+                _delete_operation,
+                auto_close_success_ms=500,
+            )
+
+        ttk.Button(button_row, text="Cancelar", command=close_dialog).pack(side="right")
+        ttk.Button(button_row, text="Borrar", command=delete_theme, style="Danger.TButton").pack(side="right", padx=(0, 8))
+
+        chooser.bind("<Escape>", lambda _event: close_dialog())
+        chooser.bind("<Return>", lambda _event: delete_theme())
+
+    def _select_active_theme_selected(self) -> None:
+        names = self.selected_containers()
+        if not names:
+            messagebox.showwarning("Tema activo", "Selecciona un contenedor Shopify.")
+            return
+        if len(names) > 1:
+            messagebox.showwarning("Tema activo", "Selecciona solo un contenedor para elegir el tema activo.")
+            return
+        self._select_active_theme_for_container(names[0])
+
+    def _delete_theme_selected(self) -> None:
+        names = self.selected_containers()
+        if not names:
+            messagebox.showwarning("Borrar tema", "Selecciona un contenedor Shopify.")
+            return
+        if len(names) > 1:
+            messagebox.showwarning("Borrar tema", "Selecciona solo un contenedor para borrar un tema.")
+            return
+        self._delete_theme_for_container(names[0])
 
     def run_docker_action(
         self,
@@ -12948,6 +13374,23 @@ code "$SCRIPT_DIR/{ws_basename}"
             "app-docs.html",
             "README.md",
         ])
+        if not os.path.isfile(docs):
+            # Fallback: intentar descargar la guia al directorio de la app.
+            try:
+                guide_path = os.path.join(self.app_dir, "guia_usuario.html")
+                req = urllib.request.Request(
+                    _DEFAULT_GUIDE_URL,
+                    headers={"User-Agent": f"ShopifyUtilidades-GuideOpen/{APP_VERSION}"},
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    content = resp.read()
+                if content and len(content) > 200:
+                    with open(guide_path, "wb") as fh:
+                        fh.write(content)
+                    docs = guide_path
+            except Exception:
+                pass
+
         if not os.path.isfile(docs):
             messagebox.showerror("Archivo", "No se encontro guia_usuario.html")
             return

@@ -5,7 +5,10 @@ a = Analysis(
     ['shopify_utilidades_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('docker_bin/docker.exe', 'docker_bin')] + [],
+    datas=[
+        ('docker_bin/docker.exe', 'docker_bin'),
+        ('guia_usuario.html', '.'),
+    ] + [],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
