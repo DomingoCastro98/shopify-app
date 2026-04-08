@@ -28,6 +28,7 @@ Te permite cargar el código de un tema local (archivo ZIP o carpeta) y aplicarl
 Te permite hacer una copia de seguridad o extraer el trabajo realizado en el contenedor hacia tu equipo local.
 - **Modo Local**: Comprime y extrae la carpeta de trabajo actual del contenedor, guardándola de forma segura en tu escritorio o en la ruta elegida.
 - **Modo Remoto**: Además de extraer los archivos locales, abre un asistente seguro en terminal para conectarse a tu tienda de Shopify y descargar (pull) la versión más reciente del tema alojado en producción, guardándolo todo organizado y empaquetado.
+- **Listado remoto**: En el modo remoto puedes usar "Listar temas remotos" para cargar los themes disponibles desde la URL de tu tienda y seleccionar uno o varios desde la lista antes de exportar.
 
 ### 5. Mercados (Markets) y Utilidades Múltiples
 Sincroniza información de los diferentes mercados configurados en tu panel de Shopify para probar la funcionalidad multi-región/divisa en local sin salir de la app.

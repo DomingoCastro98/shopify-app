@@ -1,7 +1,7 @@
 {
-  "version": "1.1.3",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.3/Shopify_Utilidades.exe",
+  "version": "1.1.4",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.4/Shopify_Utilidades.exe",
   "download_url_py": "",
   "download_url": "",
-  "notes": "Cambio de UI, arreglo de historial, agregado spinners y mejoras funcionalidades"
+  "notes": "Protección de volumes en prune (detecta y evita borrar *_history_remote y *_profiles_remote); completado wrapper de modal 'Procesando...' para refresh de Networks/Volumes; mejoras en UX de validación de protección; Agregada la opción de listar temas remotos y descargar temas remotos, exportar e improtar multiples temas y marcar como activos al importar para modificar el tema actual en modo local; Otras mejoras visuales y técnicas."
 }

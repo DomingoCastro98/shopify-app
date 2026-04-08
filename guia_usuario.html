@@ -1,129 +1,853 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shopify Utilidades App - Guía de Usuario</title>
-    <!-- Tailwind CSS (CDN) -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <style>
-        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #334155; }
-        .hero-pattern {
-            background-color: #0f766e;
-            background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2314b8a6' fill-opacity='0.4'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shopify Utilidades App - Guía de Usuario</title>
+  <meta name="description" content="Guía de usuario de Shopify Utilidades App: importación, exportación, contenedores, atajos y solución de problemas.">
+  <style>
+    :root {
+      --bg: #0b1220;
+      --bg2: #0f172a;
+      --panel: rgba(15, 23, 42, 0.82);
+      --card: rgba(255, 255, 255, 0.06);
+      --card-strong: rgba(255, 255, 255, 0.10);
+      --text: #e5eefb;
+      --muted: #a9b8d0;
+      --muted-2: #7f8ea8;
+      --line: rgba(148, 163, 184, 0.18);
+      --accent: #14b8a6;
+      --accent-2: #60a5fa;
+      --accent-3: #f59e0b;
+      --danger: #fb7185;
+      --ok: #34d399;
+      --shadow: 0 24px 60px rgba(2, 6, 23, 0.45);
+      --radius: 22px;
+      --radius-sm: 14px;
+      --max: 1180px;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(20, 184, 166, 0.22), transparent 30%),
+        radial-gradient(circle at top right, rgba(96, 165, 250, 0.18), transparent 32%),
+        linear-gradient(180deg, #07111f 0%, #0b1220 45%, #0f172a 100%);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .wrap {
+      width: min(calc(100% - 32px), var(--max));
+      margin: 0 auto;
+    }
+
+    .skip-link {
+      position: absolute;
+      left: -9999px;
+      top: 0;
+      background: #fff;
+      color: #111827;
+      padding: 10px 14px;
+      border-radius: 8px;
+      z-index: 9999;
+    }
+
+    .skip-link:focus {
+      left: 16px;
+      top: 16px;
+    }
+
+    .hero {
+      padding: 28px 0 18px;
+    }
+
+    .hero-shell {
+      position: relative;
+      overflow: hidden;
+      padding: 30px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 30px;
+      background:
+        linear-gradient(135deg, rgba(8, 15, 30, 0.96), rgba(15, 23, 42, 0.86)),
+        radial-gradient(circle at 20% 20%, rgba(20, 184, 166, 0.18), transparent 25%),
+        radial-gradient(circle at 80% 10%, rgba(96, 165, 250, 0.16), transparent 20%);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-shell::after {
+      content: "";
+      position: absolute;
+      inset: auto -120px -120px auto;
+      width: 320px;
+      height: 320px;
+      background: radial-gradient(circle, rgba(20, 184, 166, 0.18), transparent 65%);
+      filter: blur(8px);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(255, 255, 255, 0.05);
+      color: #d7eefc;
+      font-size: 0.9rem;
+      letter-spacing: 0.02em;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.95fr);
+      gap: 22px;
+      align-items: start;
+      margin-top: 18px;
+    }
+
+    .hero h1 {
+      margin: 16px 0 12px;
+      font-size: clamp(2.3rem, 5vw, 4.5rem);
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
+
+    .hero p.lead {
+      margin: 0 0 18px;
+      font-size: 1.06rem;
+      color: var(--muted);
+      max-width: 68ch;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      font-weight: 600;
+      transition: transform .16s ease, background .16s ease, border-color .16s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(148, 163, 184, 0.28);
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, rgba(20, 184, 166, 0.95), rgba(13, 148, 136, 0.92));
+      border-color: transparent;
+      color: #042f2e;
+      box-shadow: 0 16px 35px rgba(20, 184, 166, 0.2);
+    }
+
+    .btn.primary:hover {
+      background: linear-gradient(135deg, rgba(45, 212, 191, 0.98), rgba(20, 184, 166, 0.96));
+    }
+
+    .hero-card {
+      padding: 18px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      backdrop-filter: blur(8px);
+    }
+
+    .hero-card h2 {
+      margin: 0 0 12px;
+      font-size: 1.1rem;
+    }
+
+    .meta-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .meta-list li {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin-top: 6px;
+      background: var(--accent);
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.12);
+    }
+
+    .toc {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      margin: 18px 0 28px;
+      padding: 12px 0;
+      background: linear-gradient(180deg, rgba(11, 18, 32, 0.94), rgba(11, 18, 32, 0.72));
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    }
+
+    .toc-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .toc a {
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.95rem;
+      transition: background .16s ease, color .16s ease, transform .16s ease;
+    }
+
+    .toc a:hover {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.09);
+      color: var(--text);
+    }
+
+    section {
+      margin: 0 0 24px;
+    }
+
+    .section-card {
+      padding: 26px;
+      border-radius: var(--radius);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 14px;
+      font-size: clamp(1.3rem, 2.6vw, 2rem);
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+
+    .section-title .badge {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      background: rgba(20, 184, 166, 0.14);
+      color: #bff7ee;
+      border: 1px solid rgba(20, 184, 166, 0.25);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      padding: 18px;
+      border-radius: 18px;
+      background: var(--card);
+      border: 1px solid var(--line);
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 1.08rem;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .steps {
+      display: grid;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 14px;
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--line);
+    }
+
+    .step-index {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(96, 165, 250, 0.18), rgba(20, 184, 166, 0.18));
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: #dbeafe;
+      font-weight: 800;
+    }
+
+    .step h3 {
+      margin: 0 0 8px;
+    }
+
+    .step p,
+    .step ul {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .step ul {
+      padding-left: 20px;
+      margin-top: 10px;
+    }
+
+    .code-chip,
+    code {
+      padding: 0.18em 0.42em;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: #dbeafe;
+      font-family: Consolas, "SFMono-Regular", Menlo, Monaco, monospace;
+      font-size: 0.95em;
+    }
+
+    .callout {
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(20, 184, 166, 0.22);
+      background: linear-gradient(135deg, rgba(20, 184, 166, 0.12), rgba(96, 165, 250, 0.08));
+      color: #dffdf8;
+    }
+
+    .callout strong {
+      color: #ffffff;
+    }
+
+    .warn {
+      border-color: rgba(245, 158, 11, 0.28);
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(249, 115, 22, 0.07));
+    }
+
+    .danger {
+      border-color: rgba(251, 113, 133, 0.22);
+      background: linear-gradient(135deg, rgba(251, 113, 133, 0.12), rgba(96, 165, 250, 0.06));
+    }
+
+    .list {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
+
+    .list li + li {
+      margin-top: 8px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 680px;
+    }
+
+    th,
+    td {
+      padding: 14px 16px;
+      text-align: left;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+      vertical-align: top;
+    }
+
+    th {
+      color: #d7e8ff;
+      font-size: 0.92rem;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    td {
+      color: var(--muted);
+    }
+
+    .kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px;
+      padding: 0.18rem 0.45rem;
+      border-radius: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(255, 255, 255, 0.08);
+      color: #ffffff;
+      font-family: Consolas, monospace;
+      font-size: 0.88rem;
+      box-shadow: inset 0 -1px 0 rgba(255,255,255,0.04);
+    }
+
+    .footer {
+      padding: 26px 0 40px;
+      color: var(--muted-2);
+      text-align: center;
+      font-size: 0.95rem;
+    }
+
+    .footnote {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: var(--muted-2);
+    }
+
+    .top-link {
+      display: inline-flex;
+      margin-top: 12px;
+      color: #c9f7f0;
+      font-weight: 600;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .grid-2,
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-shell,
+      .section-card {
+        padding: 20px;
+      }
+
+      .toc {
+        position: static;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .wrap {
+        width: min(calc(100% - 20px), var(--max));
+      }
+
+      .hero-shell,
+      .section-card {
+        border-radius: 20px;
+      }
+
+      .hero h1 {
+        font-size: 2.1rem;
+      }
+
+      .step {
+        grid-template-columns: 1fr;
+      }
+
+      .step-index {
+        width: 42px;
+        height: 42px;
+      }
+    }
+  </style>
 </head>
-<body class="antialiased">
+<body>
+  <a class="skip-link" href="#contenido">Saltar al contenido</a>
 
-    <!-- Header -->
-    <header class="hero-pattern text-white py-16 shadow-lg">
-        <div class="container mx-auto px-6 md:px-12 text-center">
-            <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight mb-4">Shopify <span class="text-teal-200">Utilidades</span> App</h1>
-            <p class="text-xl md:text-2xl font-light text-teal-50 max-w-3xl mx-auto">
-                Tu asistente gráfico definitivo para gestionar entornos de desarrollo locales de Shopify vía Docker,
-                sin dependencias locales globales.
+  <header class="hero" id="top">
+    <div class="wrap">
+      <div class="hero-shell">
+        <span class="eyebrow">Shopify Utilidades App · Guía de usuario</span>
+        <div class="hero-grid">
+          <div>
+            <h1>Un panel local para Shopify, Docker y temas, sin fricción innecesaria.</h1>
+            <p class="lead">
+              Esta app centraliza la gestión de contenedores, el flujo de importación/exportación de themes,
+              los perfiles de trabajo, los logs y la documentación operativa. La intención de esta guía es que
+              puedas entender el flujo completo en pocos minutos y volver a él cuando algo falle.
             </p>
+            <div class="hero-actions">
+              <a class="btn primary" href="#inicio-rapido">Ir al inicio rápido</a>
+              <a class="btn" href="#importacion-exportacion">Ver importación y exportación</a>
+              <a class="btn" href="#atajos">Atajos de teclado</a>
+            </div>
+          </div>
+
+          <aside class="hero-card" aria-label="Resumen rápido">
+            <h2>Qué puedes hacer aquí</h2>
+            <ul class="meta-list">
+              <li><span class="dot"></span><span>Crear, recrear, detener y administrar contenedores Shopify desde una sola interfaz.</span></li>
+              <li><span class="dot"></span><span>Importar themes desde <span class="code-chip">.zip</span> o carpeta, con validación previa y backup automático.</span></li>
+              <li><span class="dot"></span><span>Exportar el trabajo local o sincronizar múltiples contenidos remotos con un flujo guiado y multiselección.</span></li>
+              <li><span class="dot"></span><span>Listar y descargar temas remotos desde Shopify, con opción de marcarlos como activos directamente.</span></li>
+              <li><span class="dot"></span><span>Gestionar volumes y networks en Docker sin fricciones, con protección automática de datos críticos.</span></li>
+              <li><span class="dot"></span><span>Acceder al contenedor por <strong>Remote-SSH</strong> con un modal de progreso y detección de configuración existente.</span></li>
+              <li><span class="dot"></span><span>Usar <span class="kbd">F1</span> para abrir esta guía desde la app.</span></li>
+            </ul>
+          </aside>
         </div>
-    </header>
+      </div>
+    </div>
+  </header>
 
-    <!-- Main Content -->
-    <main class="container mx-auto px-6 md:px-12 py-12">
+  <nav class="toc" aria-label="Tabla de contenido">
+    <div class="wrap toc-inner">
+      <a href="#que-es">Qué es</a>
+      <a href="#inicio-rapido">Inicio rápido</a>
+      <a href="#funciones">Funciones</a>
+      <a href="#importacion-exportacion">Importación y exportación</a>
+      <a href="#atajos">Atajos</a>
+      <a href="#solucion-problemas">Solución de problemas</a>
+      <a href="#buenas-practicas">Buenas prácticas</a>
+    </div>
+  </nav>
 
-        <!-- Introducción -->
-        <section class="max-w-4xl mx-auto mb-16 bg-white p-8 rounded-2xl shadow-sm border border-slate-100">
-            <h2 class="text-2xl font-bold text-slate-800 mb-4 flex items-center">
-                <i class="fa-solid fa-rocket text-teal-600 mr-3"></i> ¿Qué hace esta App?
-            </h2>
-            <p class="text-lg leading-relaxed mb-4">
-                Desarrollar temas en Shopify normalmente requiere instalar Node.js, Ruby y la CLI de Shopify a nivel global en tu ordenador. 
-                Esta aplicación gráfica en Python elimina esa necesidad al <strong>encapsular todo tu entorno en contenedores de Docker</strong>.
-            </p>
-            <p class="text-lg leading-relaxed">
-                Toda la comunicación de comandos viaja entre la app (GUI) y el contenedor seleccionado, permitiéndote tener versiones aisladas 
-                y seguras de tu código de producción listos para editar localmente.
-            </p>
-        </section>
-
-        <!-- Features Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-5xl mx-auto">
-
-            <!-- Feature 1: Crear / Recrear Entorno -->
-            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
-                <div class="w-12 h-12 bg-teal-100 text-teal-600 rounded-xl flex items-center justify-center text-xl mb-6">
-                    <i class="fa-solid fa-box-open"></i>
-                </div>
-                <h3 class="text-xl font-bold text-slate-800 mb-3">Crear y Recrear Entorno</h3>
-                <p class="text-slate-600 mb-4 leading-relaxed">
-                    <strong>Crear:</strong> Inicializa un contenedor Docker nuevo desde cero. Descarga de forma segura la herramienta 
-                    Shopify CLI internamente, te pide sincronizar la URL de tu tienda, realiza un clon del entorno remoto de la tienda 
-                    y ejecuta automáticamente las descargas y rutinas NPM.
-                </p>
-                <p class="text-slate-600 leading-relaxed">
-                    <strong>Recrear:</strong> Si sientes que el entorno está corrupto (errores NPM, problemas de permisos o bloqueos en Shopify CLI), 
-                    esta opción borra totalmente el contenedor antiguo, recrea una versión limpia de cero basándose en el repositorio original 
-                    o clon del tema remoto y restablece las dependencias de forma segura.
-                </p>
-            </div>
-
-            <!-- Feature 2: Importar -->
-            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
-                <div class="w-12 h-12 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-xl mb-6">
-                    <i class="fa-solid fa-upload"></i>
-                </div>
-                <h3 class="text-xl font-bold text-slate-800 mb-3">Importar Theme y Datos</h3>
-                <p class="text-slate-600 mb-4 leading-relaxed">
-                    Transfiere fácilmente código desde tu ordenador (un ZIP o un directorio) hacia dentro del contenedor virtual de Docker.
-                </p>
-                <ul class="list-disc pl-5 mt-2 text-slate-600 space-y-2">
-                    <li>Copilado y <code>npm install</code> automáticos.</li>
-                    <li><strong>Proceso de AutoFix Inteligente:</strong> La aplicación lee <code>settings_schema.json</code> y repara silenciosamente discrepancias e incongruencias en el fichero de datos <code>settings_data.json</code> (ej. números donde la tienda remota obliga formato string o bordes que exceden esquemas).</li>
-                    <li>Soporta despliegue ('Push') automático seguro a la tienda Shopify en Real (Live).</li>
-                </ul>
-            </div>
-
-            <!-- Feature 3: Exportar -->
-            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
-                <div class="w-12 h-12 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center text-xl mb-6">
-                    <i class="fa-solid fa-download"></i>
-                </div>
-                <h3 class="text-xl font-bold text-slate-800 mb-3">Exportar Theme y Datos</h3>
-                <p class="text-slate-600 mb-4 leading-relaxed">
-                    El asistente más importante para hacer un backup o extraer tu trabajo antes de subirlo.
-                </p>
-                <ul class="list-disc pl-5 mt-2 text-slate-600 space-y-2">
-                    <li><strong>Exportación Local:</strong> Empaqueta en formato <code>.tar</code> el entorno completo <code>/app</code> en Docker para extraerlo a tu escritorio/documentos de forma rápida y persistente (con todos tus cambios no guardados en remoto).</li>
-                    <li><strong>Descarga Remota ('Pull'):</strong> La aplicación abre de forma segura una CLI de Shopify en una consola embebida que descarga a la fuerza (vía credencial temporal) todos los assets directamente desde remoto e introduce estos ficheros dentro del paquete de exportación local descargado.</li>
-                </ul>
-            </div>
-
-            <!-- Feature 4: Gestión y Mercados -->
-            <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
-                <div class="w-12 h-12 bg-orange-100 text-orange-600 rounded-xl flex items-center justify-center text-xl mb-6">
-                    <i class="fa-solid fa-server"></i>
-                </div>
-                <h3 class="text-xl font-bold text-slate-800 mb-3">Gestión de Contenedores y Mercados</h3>
-                <p class="text-slate-600 mb-4 leading-relaxed">
-                    Desde la barra de navegación principal de la izquierda de la app, manejas la 'Sala de Máquinas':
-                </p>
-                <ul class="list-disc pl-5 mt-2 text-slate-600 space-y-2">
-                    <li>Iniciar/Parar y eliminar entornos de trabajo.</li>
-                    <li>Saltar a los ficheros Log de Docker o abrir una Shell interactiva directamente al entorno del contenedor para debugear comandos sin salir a consola o configurar entornos multi URL.</li>
-                    <li>Informes, estadísticas de mercado de Shopify CLI e información local centralizada de la base de datos de Docker.</li>
-                </ul>
-            </div>
-
+  <main id="contenido" class="wrap">
+    <section id="que-es" class="section-card">
+      <h2 class="section-title"><span class="badge">1</span>Qué hace esta aplicación</h2>
+      <p class="muted">
+        Shopify Utilidades App es una interfaz de escritorio en Python para trabajar con temas Shopify dentro de contenedores Docker.
+        La app evita instalar de forma global Node.js, Ruby o Shopify CLI en el sistema, y agrupa el flujo de trabajo en una sola ventana.
+      </p>
+      <div class="grid-3" style="margin-top: 18px;">
+        <div class="card">
+          <h3>Contenedores</h3>
+          <p>Ver estado, arrancar, parar, borrar, renombrar y abrir acceso remoto por SSH con flujo guiado.</p>
         </div>
-
-    </main>
-
-    <!-- Footer -->
-    <footer class="bg-slate-800 text-slate-400 py-8 mt-12">
-        <div class="container mx-auto px-6 text-center text-sm">
-            <p>&copy; 2026 Shopify Utilidades App (v1.0.0) | Mantenido con Docker</p>
+        <div class="card">
+          <h3>Theme workflow</h3>
+          <p>Importar, validar, auto-corregir settings, crear backup previo y opcionalmente ejecutar push o pull remoto.</p>
         </div>
-    </footer>
+        <div class="card">
+          <h3>Visibilidad</h3>
+          <p>Panel de estado, historial de acciones, logs y documentación accesible desde la barra lateral y F1.</p>
+        </div>
+      </div>
+    </section>
 
+    <section id="inicio-rapido" class="section-card">
+      <h2 class="section-title"><span class="badge">2</span>Inicio rápido</h2>
+      <div class="steps">
+        <article class="step">
+          <div class="step-index">1</div>
+          <div>
+            <h3>Comprueba Docker</h3>
+            <p>La app necesita Docker Desktop o un daemon Docker accesible. El panel lateral te mostrará si Docker está disponible y qué modo está activo.</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-index">2</div>
+          <div>
+            <h3>Elige el modo correcto</h3>
+            <p>En <strong>local</strong>, la app trabaja contra Docker en tu máquina. En <strong>remoto</strong>, usa un host Docker TCP o SSH configurado por la propia aplicación.</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-index">3</div>
+          <div>
+            <h3>Abre el flujo que necesitas</h3>
+            <p>Usa la barra lateral para crear/recrear entorno, importar, exportar o administrar contenedores. Cada flujo abre un asistente guiado.</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-index">4</div>
+          <div>
+            <h3>Valida antes de ejecutar</h3>
+            <p>Los asistentes de importación y exportación incluyen resumen de configuración y validación previa. En importación puedes activar backup automático antes de modificar nada.</p>
+          </div>
+        </article>
+      </div>
+      <div class="callout" style="margin-top: 18px;">
+        <strong>Consejo:</strong> si no recuerdas qué hace una sección, pulsa <span class="kbd">F1</span> para volver a esta guía.
+      </div>
+    </section>
+
+    <section id="funciones" class="section-card">
+      <h2 class="section-title"><span class="badge">3</span>Funciones principales</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Crear / Recrear entorno</h3>
+          <p>
+            Inicia un contenedor limpio con dependencias de trabajo y, si hace falta, vuelve a construir el entorno desde cero.
+            Es la opción adecuada cuando quieres partir de una base nueva o cuando el contenedor actual ya no es fiable.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Gestionar contenedores</h3>
+          <p>
+            Incluye listado, arranque, parada, eliminación, renombrado, inspección rápida y acceso remoto SSH para trabajar dentro del contenedor.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Gestionar volumes y networks</h3>
+          <p>
+            Crea, inspecciona, clona y limpia volumes. Conecta y desconecta contenedores de networks con protección automática de volumes críticos 
+            (incluyendo <span class="code-chip">*_history_remote</span> y <span class="code-chip">*_profiles_remote</span>) en operaciones prune.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Acceso remoto SSH</h3>
+          <p>
+            Al pulsar Acceso Remoto (SSH), la app muestra un modal con progreso en vivo.
+            Si ya existe configuración en <span class="code-chip">~/.ssh/config</span>, permite editar HostName y Port;
+            si no cambias nada, reutiliza la configuración y abre VS Code directamente.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Temas remotos</h3>
+          <p>
+            Lista los temas disponibles en tu tienda Shopify. Puedes seleccionar múltiples temas y descargarlos de una vez. 
+            Al importar, tienes la opción de marcar un tema como activo para cambiar el tema actual.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Perfiles</h3>
+          <p>
+            La app guarda conjuntos de contenedores para agrupar entornos de trabajo. Puedes mantener perfiles privados o remotos según el modo de conexión.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Historial y logs</h3>
+          <p>
+            Toda acción relevante queda registrada. El historial se puede filtrar por nivel y búsqueda textual, y los logs se exportan o copian desde la UI.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="importacion-exportacion" class="section-card">
+      <h2 class="section-title"><span class="badge">4</span>Importación y exportación</h2>
+      <p class="muted">
+        El flujo de importación y exportación ahora soporta multiselección remota y mayor control visual.
+        Todas las operaciones largas usan un modal unificado de "Procesando..." con spinner animado y estado final.
+      </p>
+
+      <div class="grid-2" style="margin-top: 16px;">
+        <div class="card">
+          <h3>Importar theme / datos</h3>
+          <ul class="list">
+            <li>Selecciona una carpeta o un <span class="code-chip">.zip</span>.</li>
+            <li>Pulsa <strong>Validar</strong> para ver el resumen de archivos y la preparación del flujo.</li>
+            <li>Activa el <strong>backup automático</strong> si quieres una copia previa del contenedor.</li>
+            <li>La app ejecuta <span class="code-chip">npm install</span> y, si procede, el auto-fix de settings.</li>
+            <li>Opcionalmente <strong>marca como activo</strong> para cambiar el tema actual después de la importación.</li>
+            <li>Si eliges push, se abre el proceso guiado para publicar en Shopify.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Exportar theme / datos</h3>
+          <ul class="list">
+            <li>El modo local empaqueta el contenido del contenedor y lo extrae en una carpeta de destino.</li>
+            <li>El modo remoto te permite <strong>listar y seleccionar múltiples temas</strong> desde Shopify.</li>
+            <li>Los temas remotos se descargan en paralelo con un modal de progreso.</li>
+            <li>También hay validación previa para no lanzar una exportación mal configurada.</li>
+            <li>Los resultados se guardan en una carpeta con marca temporal para evitar sobrescrituras accidentales.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="steps" style="margin-top: 18px;">
+        <article class="step">
+          <div class="step-index">A</div>
+          <div>
+            <h3>Flujo local vs remoto</h3>
+            <p>Cuando abres el exportador, puedes elegir entre <strong>Local</strong> (contenedor en tu máquina) o <strong>Remoto</strong> (Shopify CLI). En remoto, la app lista automáticamente los temas disponibles con multiselección.</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-index">B</div>
+          <div>
+            <h3>Modal de progreso</h3>
+            <p>Durante cualquier operación larga (descargas, importaciones, exportaciones), verás un modal con spinner animado. El estado final muestra completado (verde) o error (rojo) con opción de cerrar manualmente.</p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="step-index">C</div>
+          <div>
+            <h3>Después de importar/exportar</h3>
+            <p>Si es una importación y marcaste "activo", el tema se establece como actual sin pasos adicionales. Los logs muestran el resumen de operación.</p>
+          </div>
+        </article>
+      </div>
+
+      <div class="callout warn" style="margin-top: 18px;">
+        <strong>Importante:</strong> si activas backup automático, la app crea una copia del contenido del contenedor antes de tocar el theme. Es la opción recomendada cuando vas a hacer cambios grandes.
+      </div>
+      
+      <div class="callout" style="margin-top: 12px;">
+        <strong>Protección de datos:</strong> en las operaciones de limpieza (prune) de volumes, la app detecta automáticamente y protege todos los volumes que contengan <span class="code-chip">_history_remote</span> o <span class="code-chip">_profiles_remote</span> en el nombre, independientemente de la tecnología. Nunca se borrarán accidentalmente.
+      </div>
+    </section>
+
+    <section id="atajos" class="section-card">
+      <h2 class="section-title"><span class="badge">5</span>Atajos de teclado</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Atajo</th>
+              <th>Acción</th>
+              <th>Uso recomendado</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="kbd">Ctrl</span> + <span class="kbd">R</span></td>
+              <td>Refrescar la vista</td>
+              <td>Actualiza contenedores, historial y paneles relevantes.</td>
+            </tr>
+            <tr>
+              <td><span class="kbd">Ctrl</span> + <span class="kbd">I</span></td>
+              <td>Abrir importación</td>
+              <td>Accede rápido al asistente de importación.</td>
+            </tr>
+            <tr>
+              <td><span class="kbd">Ctrl</span> + <span class="kbd">E</span></td>
+              <td>Abrir exportación</td>
+              <td>Accede al asistente de exportación.</td>
+            </tr>
+            <tr>
+              <td><span class="kbd">Ctrl</span> + <span class="kbd">L</span></td>
+              <td>Crear / recrear entorno</td>
+              <td>Abre el flujo de creación de entorno.</td>
+            </tr>
+            <tr>
+              <td><span class="kbd">Ctrl</span> + <span class="kbd">B</span></td>
+              <td>Alternar vista compacta</td>
+              <td>Útil en pantallas pequeñas o cuando necesitas más espacio para las tablas.</td>
+            </tr>
+            <tr>
+              <td><span class="kbd">F1</span></td>
+              <td>Guía de usuario</td>
+              <td>Abre esta documentación desde cualquier momento.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="solucion-problemas" class="section-card">
+      <h2 class="section-title"><span class="badge">6</span>Solución de problemas</h2>
+      <div class="grid-2">
+        <div class="card danger">
+          <h3>F1 no abre la guía</h3>
+          <p>La app busca <span class="code-chip">guia_usuario.html</span> en la carpeta raíz del proyecto y, si falla, intenta abrir <span class="code-chip">README.md</span> como fallback.</p>
+        </div>
+        <div class="card">
+          <h3>Docker no aparece disponible</h3>
+          <p>Verifica que Docker Desktop esté iniciado y que el modo local o remoto coincida con tu configuración. El panel lateral te mostrará el estado detectado.</p>
+        </div>
+        <div class="card">
+          <h3>Importación rechazada por validación</h3>
+          <p>Comprueba la ruta del theme, si el ZIP está intacto y si el contenedor seleccionado es el correcto. El resumen de validación te dirá qué falta.</p>
+        </div>
+        <div class="card">
+          <h3>Exportación remota no avanza</h3>
+          <p>Normalmente el problema está en la sesión de Shopify CLI, en la URL de tienda o en credenciales no válidas. Revisa la terminal que se abre para el login.</p>
+        </div>
+        <div class="card">
+          <h3>Modal "Procesando..." se queda colgado</h3>
+          <p>Las operaciones largas se ejecutan en un hilo secundario. Si se cuelga, revisa los logs y considera reiniciar la app. El modal siempre te permite cerrar manualmente.</p>
+        </div>
+        <div class="card">
+          <h3>Acceso remoto SSH parece detenido</h3>
+          <p>El flujo actual muestra un modal con pasos en vivo (sshd, clave pública, puerto y ~/.ssh/config). Si tarda, espera a que termine la instalación inicial de openssh dentro del contenedor.</p>
+        </div>
+        <div class="card">
+          <h3>Prune de volumes rechazado</h3>
+          <p>El sistema detecta automáticamente y protege volumes con <span class="code-chip">_history_remote</span> y <span class="code-chip">_profiles_remote</span> en el nombre. También se protegen todos los volumes en uso. Solo se eliminan los realmente sin referencia.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="buenas-practicas" class="section-card">
+      <h2 class="section-title"><span class="badge">7</span>Buenas prácticas</h2>
+      <ul class="list">
+        <li>Antes de importar, valida siempre el paquete y activa backup automático cuando el cambio sea importante.</li>
+        <li>En exportación remota, usa multiselección para descargar varios temas de una sola vez. El modal de progreso te indicará el estado.</li>
+        <li>Marca temas como "activos" al importar remotamente solo si tienes certeza de que quieres cambiar el tema actual de la tienda.</li>
+        <li>En gestión de volumes, el sistema protege automáticamente <span class="code-chip">*_history_remote</span> y <span class="code-chip">*_profiles_remote</span> en prune. No necesitas preocuparte.</li>
+        <li>Usa perfiles para agrupar contenedores por proyecto o por entorno.</li>
+        <li>Mantén el historial limpio y usa filtros para encontrar rápidamente una acción concreta.</li>
+        <li>Usa Acceso Remoto (SSH) como vía principal de edición remota; ya no depende de editor web en el contenedor.</li>
+        <li>Cuando trabajes con varios monitores o pantallas pequeñas, activa la vista compacta con <span class="kbd">Ctrl</span> + <span class="kbd">B</span>.</li>
+        <li>Usa <span class="kbd">F1</span> como acceso rápido a esta guía cuando no recuerdes el flujo correcto.</li>
+      </ul>
+      <div class="callout" style="margin-top: 18px;">
+        <strong>Idea práctica:</strong> si algo ya funcionaba y dejó de funcionar, primero revisa el modo Docker y el panel de estado. Las operaciones largas ahora tienen modal visual, así que no dudes en esperar si el spinner sigue animado.
+      </div>
+      <a class="top-link" href="#top">Volver arriba</a>
+    </section>
+
+    <p class="footnote">
+      Esta guía está pensada para acompañar el flujo real de la app. Si el proyecto evoluciona, conviene mantener este HTML alineado con los cambios de la interfaz.
+    </p>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <div>Shopify Utilidades App · Guía de usuario</div>
+      <div>Acceso rápido desde la app con <span class="kbd">F1</span></div>
+    </div>
+  </footer>
 </body>
 </html>
