@@ -1,8 +1,8 @@
 {
-  "version": "1.1.5",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.5/Shopify_Utilidades.exe",
+  "version": "1.1.6",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.6/Shopify_Utilidades.exe",
   "download_url_py": "",
   "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Mejoras de UX y estabilidad: filtro de contenedores ajustado (principal y gestor avanzado), selección/borrado de tema activo en contenedores Shopify con validaciones de seguridad, protección de volumes críticos en prune, eliminación del acceso Doc script en barra lateral y actualización automática de guia_usuario.html durante update con fallback de descarga al abrir la guía."
+  "notes": "Ajustes de experiencia y actualización: la guía de usuario ya no abre consola (CMD), el modal de actualización mantiene siempre visibles los botones aunque haya notas largas (con scroll y redimensionado), y se incorpora icono estilo cesta Shopify en la app. Incluye mejoras previas de estabilidad en contenedores/temas y actualización automática de guia_usuario.html."
 }

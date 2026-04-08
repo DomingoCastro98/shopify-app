@@ -29,7 +29,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.5"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.6"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -551,12 +551,42 @@ class ShopifyUtilitiesApp:
         self._docker_last_ready = available
         self._refresh_observability_panel()
 
+    def _apply_app_icon(self) -> None:
+        """Configura un icono estilo cesta de Shopify sin depender de archivos externos."""
+        try:
+            icon = tk.PhotoImage(width=64, height=64)
+
+            # Fondo transparente no fiable en todos los WM: usamos fondo claro neutro.
+            icon.put("#f6f6f7", to=(0, 0, 64, 64))
+
+            # Cuerpo de la cesta
+            icon.put("#95bf47", to=(8, 20, 56, 58))
+            icon.put("#5e8e3e", to=(8, 20, 56, 24))
+
+            # Asa
+            icon.put("#5e8e3e", to=(18, 12, 46, 16))
+            icon.put("#5e8e3e", to=(16, 14, 20, 20))
+            icon.put("#5e8e3e", to=(44, 14, 48, 20))
+
+            # Marca simplificada estilo Shopify (S blanca)
+            icon.put("#ffffff", to=(22, 28, 42, 32))
+            icon.put("#ffffff", to=(22, 32, 26, 40))
+            icon.put("#ffffff", to=(22, 40, 42, 44))
+            icon.put("#ffffff", to=(38, 44, 42, 50))
+            icon.put("#ffffff", to=(22, 50, 42, 54))
+
+            self.root.iconphoto(True, icon)
+            self._app_icon_image = icon
+        except Exception:
+            pass
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Utilidades Shopify + Docker")
         self.root.geometry("1280x720")
         self.root.minsize(820, 500)
         self.root.configure(background="#f6f6f7")
+        self._apply_app_icon()
         try:
             self.root.state("zoomed")
         except tk.TclError:
@@ -737,15 +767,16 @@ class ShopifyUtilitiesApp:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Actualización disponible")
-        dlg.geometry("460x300")
-        dlg.resizable(False, False)
+        dlg.geometry("500x420")
+        dlg.minsize(500, 420)
+        dlg.resizable(True, True)
         dlg.grab_set()
         dlg.configure(bg="#f6f6f7")
 
         # Centrar sobre la ventana principal
         self.root.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() - 460) // 2
-        y = self.root.winfo_y() + (self.root.winfo_height() - 300) // 2
+        x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 420) // 2
         dlg.geometry(f"+{x}+{y}")
 
         tk.Label(
@@ -764,17 +795,6 @@ class ShopifyUtilitiesApp:
             fg="#6d7175",
         ).pack()
 
-        if notes:
-            tk.Label(
-                dlg,
-                text=notes,
-                font=("Segoe UI", 10),
-                bg="#f6f6f7",
-                fg="#6d7175",
-                wraplength=400,
-                justify="center",
-            ).pack(pady=(10, 0))
-
         progress_var = tk.DoubleVar(value=0)
         status_var = tk.StringVar(value="")
         progress_panel, _ = self._build_progress_panel(
@@ -785,15 +805,58 @@ class ShopifyUtilitiesApp:
             progress_var,
             style_name="AppWarm.Horizontal.TProgressbar",
         )
-        progress_panel.pack(fill="x", padx=22, pady=(14, 14))
+        progress_panel.pack(side="bottom", fill="x", padx=22, pady=(8, 14))
 
         btn_frame = tk.Frame(dlg, bg="#f6f6f7")
-        btn_frame.pack()
+        btn_frame.pack(side="bottom", pady=(0, 6))
 
         update_btn = ttk.Button(btn_frame, text="⬇  Descargar e instalar", style="Accent.TButton")
         skip_btn   = ttk.Button(btn_frame, text="Ahora no", style="Ghost.TButton")
         update_btn.pack(side="left", padx=6)
         skip_btn.pack(side="left", padx=6)
+
+        notes_frame = tk.Frame(dlg, bg="#f6f6f7")
+        notes_frame.pack(fill="both", expand=True, padx=22, pady=(10, 6))
+        if notes:
+            tk.Label(
+                notes_frame,
+                text="Notas de la actualización",
+                font=("Segoe UI Semibold", 10),
+                bg="#f6f6f7",
+                fg="#202223",
+                anchor="w",
+            ).pack(fill="x", pady=(0, 4))
+
+            notes_box_wrap = tk.Frame(notes_frame, bg="#f6f6f7")
+            notes_box_wrap.pack(fill="both", expand=True)
+
+            notes_scroll = ttk.Scrollbar(notes_box_wrap, orient="vertical")
+            notes_text = tk.Text(
+                notes_box_wrap,
+                height=7,
+                wrap="word",
+                font=("Segoe UI", 10),
+                bg="#ffffff",
+                fg="#4b5563",
+                relief="solid",
+                borderwidth=1,
+                yscrollcommand=notes_scroll.set,
+            )
+            notes_scroll.config(command=notes_text.yview)
+            notes_scroll.pack(side="right", fill="y")
+            notes_text.pack(side="left", fill="both", expand=True)
+            notes_text.insert("1.0", notes)
+            notes_text.configure(state="disabled")
+        else:
+            tk.Label(
+                notes_frame,
+                text="Esta versión incluye mejoras y correcciones de estabilidad.",
+                font=("Segoe UI", 10),
+                bg="#f6f6f7",
+                fg="#6d7175",
+                wraplength=440,
+                justify="left",
+            ).pack(fill="x")
 
         def do_skip() -> None:
             dlg.destroy()
@@ -13395,7 +13458,11 @@ code "$SCRIPT_DIR/{ws_basename}"
             messagebox.showerror("Archivo", "No se encontro guia_usuario.html")
             return
         try:
-            os.startfile(docs)  # type: ignore[attr-defined]
+            import pathlib
+            import webbrowser
+
+            docs_uri = pathlib.Path(os.path.abspath(docs)).resolve().as_uri()
+            webbrowser.open_new_tab(docs_uri)
             self.log_event("DOCS", os.path.basename(docs), "INFO", "Documentacion app abierta")
             self.refresh_history()
         except Exception as exc:  # pragma: no cover
