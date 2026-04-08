@@ -2,6 +2,7 @@
 import io
 import json
 import math
+from pathlib import Path
 import queue
 import re
 import shlex
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import traceback
+import webbrowser
 import zipfile
 import tkinter as tk
 import unicodedata
@@ -29,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.7"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.8"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -42,7 +44,6 @@ APP_VERSION = "1.1.7"  # <-- actualiza este valor en cada release
 _UPDATE_CHECK_URLS = [
     "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/version.json"
 ]
-_DEFAULT_GUIDE_URL = "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html"
 
 
 def _is_frozen_app() -> bool:
@@ -78,10 +79,6 @@ def _select_download_url(update_info: dict) -> str:
     )
 
 
-def _select_guide_url(update_info: dict) -> str:
-    return update_info.get("guide_url") or update_info.get("guia_url") or _DEFAULT_GUIDE_URL
-
-
 def _parse_version(v: str) -> tuple[int, ...]:
     """Convierte '1.2.3' en (1, 2, 3) para comparar numéricamente."""
     try:
@@ -98,7 +95,8 @@ def _check_for_updates_worker(current_version: str, callback: "Callable[[dict], 
             try:
                 req = urllib.request.Request(
                     check_url,
-                    headers={"User-Agent": f"ShopifyUtilidades-UpdateChecker/{current_version}"},
+                    headers={
+                        "User-Agent": f"ShopifyUtilidades-UpdateChecker/{current_version}"},
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
@@ -299,7 +297,8 @@ Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "ping 127.0.0.1 -n 2 >nul 
 
 try:
     import docker  # type: ignore[import-not-found]
-    from docker.errors import APIError, DockerException, NotFound  # type: ignore[import-not-found]
+    # type: ignore[import-not-found]
+    from docker.errors import APIError, DockerException, NotFound
 except Exception:  # pragma: no cover
     docker = None  # type: ignore[assignment]
     APIError = Exception  # type: ignore[assignment]
@@ -316,9 +315,11 @@ def _looks_like_container_spec(path_value: str) -> bool:
 
 def _sdk_create_client(base_url: str | None, timeout_seconds: int | None) -> object:
     if docker is None:
-        raise RuntimeError("Docker SDK no disponible. Instala paquete Python 'docker'.")
+        raise RuntimeError(
+            "Docker SDK no disponible. Instala paquete Python 'docker'.")
     if base_url:
-        client = docker.DockerClient(base_url=base_url, timeout=timeout_seconds)
+        client = docker.DockerClient(
+            base_url=base_url, timeout=timeout_seconds)
     else:
         client = docker.from_env(timeout=timeout_seconds)
     client.ping()
@@ -374,7 +375,8 @@ def _run_sdk_cp_helper(direction: str, base_url: str | None, src: str, dst: str)
     client = _sdk_create_client(base_url=base_url, timeout_seconds=None)
     if direction == "from":
         container_name, container_path = src.split(":", 1)
-        _sdk_cp_from_container_impl(client, container_name, container_path, dst)
+        _sdk_cp_from_container_impl(
+            client, container_name, container_path, dst)
         return 0
     if direction == "to":
         container_name, container_path = dst.split(":", 1)
@@ -489,7 +491,8 @@ class ShopifyUtilitiesApp:
             self.profiles_listbox.delete(0, tk.END)
             error_text = msg or "Error al cargar perfiles remotos"
             self.profiles_listbox.insert(tk.END, error_text)
-        self._profiles_remote_backoff_until = time.time() + self._profiles_remote_retry_cooldown_sec
+        self._profiles_remote_backoff_until = time.time(
+        ) + self._profiles_remote_retry_cooldown_sec
 
     def _register_tooltip(self, widget: tk.Widget | None, text: str) -> None:
         if widget is None:
@@ -543,7 +546,8 @@ class ShopifyUtilitiesApp:
             f"Modo: remoto" if self.docker_mode == "remote" and self.docker_host else "Modo: local"
         )
         if self._recent_errors:
-            self.recent_error_var.set(f"Error reciente: {self._recent_errors[0]}")
+            self.recent_error_var.set(
+                f"Error reciente: {self._recent_errors[0]}")
         elif not self.recent_error_var.get().strip():
             self.recent_error_var.set("Error reciente: -")
 
@@ -604,8 +608,10 @@ class ShopifyUtilitiesApp:
             self.root.attributes("-zoomed", True)
 
         self.profiles_file = os.path.join(self.app_dir, "perfiles_shopify.ini")
-        self.private_profiles_dir = os.path.join(os.environ.get("LOCALAPPDATA", self.tools_dir), "ShopifyUtilidades")
-        self.private_profiles_file = os.path.join(self.private_profiles_dir, "private_profiles.json")
+        self.private_profiles_dir = os.path.join(os.environ.get(
+            "LOCALAPPDATA", self.tools_dir), "ShopifyUtilidades")
+        self.private_profiles_file = os.path.join(
+            self.private_profiles_dir, "private_profiles.json")
         self.remote_profiles_volume = "shu_profiles_remote"
         self.remote_profiles_path = "/data/profiles.json"
         self.remote_history_volume = "shu_history_remote"
@@ -644,17 +650,20 @@ class ShopifyUtilitiesApp:
         self._docker_last_ready = False
         self._docker_last_checked_at = 0.0
         self._docker_check_in_progress = False
-        self._docker_check_queue: queue.Queue[tuple[bool, str, str]] = queue.Queue()
+        self._docker_check_queue: queue.Queue[tuple[bool, str, str]] = queue.Queue(
+        )
         self._docker_check_job_id: str | None = None
         self._history_refresh_in_progress = False
         self._history_refresh_requested = False
-        self._history_refresh_queue: queue.Queue[tuple[bool, object]] = queue.Queue()
+        self._history_refresh_queue: queue.Queue[tuple[bool, object]] = queue.Queue(
+        )
         self._history_refresh_job_id: str | None = None
         self._history_pending_lines: list[str] = []
         self._history_pending_lock = threading.Lock()
         self._profiles_loading = False
         self._profiles_load_requested = False
-        self._profiles_load_queue: queue.Queue[tuple[str, bool, object]] = queue.Queue()
+        self._profiles_load_queue: queue.Queue[tuple[str, bool, object]] = queue.Queue(
+        )
         self._profiles_load_job_id: str | None = None
         self._profiles_load_guard_job_id: str | None = None
         self._profiles_loading_scope: str | None = None
@@ -689,7 +698,8 @@ class ShopifyUtilitiesApp:
         self._tooltips: list[_Tooltip] = []
         self._recent_errors: list[str] = []
         self._last_action_text = "-"
-        self._container_rows_snapshot: list[tuple[str, str, str, str, str]] = []
+        self._container_rows_snapshot: list[tuple[str, str, str, str, str]] = [
+            ]
         self.sidebar_frame: tk.Frame | None = None
         self.sidebar_logo_title_label: tk.Label | None = None
         self.sidebar_logo_subtitle_label: tk.Label | None = None
@@ -708,7 +718,8 @@ class ShopifyUtilitiesApp:
         self._history_spinner_frame: object = None  # type: ignore[assignment]
         self._history_spinner_job: str | None = None
         self._history_spinner_index: int = 0
-        self._history_spinner_dot_label: object = None  # type: ignore[assignment]
+        # type: ignore[assignment]
+        self._history_spinner_dot_label: object = None
         self.docker_status_dot: tk.Label | None = None
         self.connection_mode_badge: tk.Label | None = None
         self.container_action_btns: list[ttk.Button] = []
@@ -771,7 +782,6 @@ class ShopifyUtilitiesApp:
         """Muestra una ventana de actualización con progreso de descarga."""
         remote_ver = update_info.get("version", "?")
         download_url = _select_download_url(update_info)
-        guide_url = _select_guide_url(update_info)
         notes = update_info.get("notes", "")
 
         dlg = tk.Toplevel(self.root)
@@ -819,8 +829,10 @@ class ShopifyUtilitiesApp:
         btn_frame = tk.Frame(dlg, bg="#f6f6f7")
         btn_frame.pack(side="bottom", pady=(0, 6))
 
-        update_btn = ttk.Button(btn_frame, text="⬇  Descargar e instalar", style="Accent.TButton")
-        skip_btn   = ttk.Button(btn_frame, text="Ahora no", style="Ghost.TButton")
+        update_btn = ttk.Button(
+            btn_frame, text="⬇  Descargar e instalar", style="Accent.TButton")
+        skip_btn = ttk.Button(btn_frame, text="Ahora no",
+                              style="Ghost.TButton")
         update_btn.pack(side="left", padx=6)
         skip_btn.pack(side="left", padx=6)
 
@@ -884,7 +896,8 @@ class ShopifyUtilitiesApp:
             status_var.set("Iniciando descarga...")
             t = threading.Thread(
                 target=self._download_and_apply_update,
-                args=(download_url, guide_url, dlg, status_var, progress_var, update_btn, skip_btn),
+                args=(download_url, dlg, status_var,
+                      progress_var, update_btn, skip_btn),
                 daemon=True,
             )
             t.start()
@@ -895,7 +908,6 @@ class ShopifyUtilitiesApp:
     def _download_and_apply_update(
         self,
         url: str,
-        guide_url: str,
         dlg: tk.Toplevel,
         status_var: tk.StringVar,
         progress_var: tk.DoubleVar,
@@ -923,7 +935,8 @@ class ShopifyUtilitiesApp:
         os.close(fd)
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": f"ShopifyUtilidades-Updater/{APP_VERSION}"})
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"ShopifyUtilidades-Updater/{APP_VERSION}"})
             with urllib.request.urlopen(req, timeout=60) as resp:
                 total = int(resp.headers.get("Content-Length") or 0)
                 downloaded = 0
@@ -942,7 +955,8 @@ class ShopifyUtilitiesApp:
                             ui(lambda p=_pct: progress_var.set(p))
                         kb = downloaded // 1024
                         _kb = kb
-                        ui(lambda k=_kb: status_var.set(f"Descargando... {k} KB"))
+                        ui(lambda k=_kb: status_var.set(
+                            f"Descargando... {k} KB"))
 
                 if total > 0 and downloaded != total:
                     raise RuntimeError(
@@ -952,7 +966,8 @@ class ShopifyUtilitiesApp:
             # Verificación mínima: que el archivo no esté vacío
             size = os.path.getsize(tmp_path)
             if size < 100:
-                raise RuntimeError("El archivo descargado parece incompleto o inválido.")
+                raise RuntimeError(
+                    "El archivo descargado parece incompleto o inválido.")
 
             # Validaciones de integridad según tipo de actualización.
             if _is_frozen_app():
@@ -977,36 +992,8 @@ class ShopifyUtilitiesApp:
                     )
 
             ui(lambda: progress_var.set(100))
-            ui(lambda: status_var.set("Descarga completada. Aplicando actualización..."))
-
-            # Intentar actualizar la guia de usuario junto con la app.
-            try:
-                if guide_url:
-                    guide_target_dir = os.path.dirname(current_target) or self.app_dir
-                    os.makedirs(guide_target_dir, exist_ok=True)
-                    guide_path = os.path.join(guide_target_dir, "guia_usuario.html")
-                    guide_tmp_fd, guide_tmp_path = tempfile.mkstemp(prefix="wpu_guide_", suffix=".html")
-                    os.close(guide_tmp_fd)
-                    try:
-                        guide_req = urllib.request.Request(
-                            guide_url,
-                            headers={"User-Agent": f"ShopifyUtilidades-GuideUpdater/{APP_VERSION}"},
-                        )
-                        with urllib.request.urlopen(guide_req, timeout=30) as gresp:
-                            content = gresp.read()
-                        if content and len(content) > 200:
-                            with open(guide_tmp_path, "wb") as gfh:
-                                gfh.write(content)
-                            os.replace(guide_tmp_path, guide_path)
-                    finally:
-                        try:
-                            if os.path.exists(guide_tmp_path):
-                                os.remove(guide_tmp_path)
-                        except OSError:
-                            pass
-            except Exception:
-                # No bloquear actualización binaria/script si falla la guía.
-                pass
+            ui(lambda: status_var.set(
+                "Descarga completada. Aplicando actualización..."))
 
             # Pequeña pausa para que el usuario vea el mensaje
             time.sleep(1.2)
@@ -1057,33 +1044,40 @@ class ShopifyUtilitiesApp:
             pass
 
         # ── Visual system ───────────────────────────────────────────────────
-        bg        = "#edf2f7"
-        surface   = "#ffffff"
-        surface2  = "#f3f6fb"
-        text      = "#0f172a"
-        text2     = "#5b6778"
-        muted     = "#748097"
-        accent    = "#0f766e"
+        bg = "#edf2f7"
+        surface = "#ffffff"
+        surface2 = "#f3f6fb"
+        text = "#0f172a"
+        text2 = "#5b6778"
+        muted = "#748097"
+        accent = "#0f766e"
         accent_hv = "#115e59"
         accent_lt = "#d8f3ef"
-        border    = "#cbd5e1"
-        selected  = "#e6fbf7"
-        danger    = "#dc2626"
+        border = "#cbd5e1"
+        selected = "#e6fbf7"
+        danger = "#dc2626"
 
         self.root.configure(bg=bg)
 
-        style.configure(".", font=("Segoe UI", 10), background=bg, foreground=text)
+        style.configure(".", font=("Segoe UI", 10),
+                        background=bg, foreground=text)
         style.configure("TFrame", background=bg)
         style.configure("Card.TFrame", background=surface)
         style.configure("TLabel", background=bg, foreground=text)
         style.configure("Surface.TLabel", background=surface, foreground=text)
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 15), background=bg, foreground=text)
-        style.configure("Section.TLabel", font=("Segoe UI Semibold", 11), background=bg, foreground=accent)
-        style.configure("Muted.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
-        style.configure("Chip.TLabel", background=accent_lt, foreground=accent, font=("Segoe UI Semibold", 9))
+        style.configure("Title.TLabel", font=(
+            "Segoe UI Semibold", 15), background=bg, foreground=text)
+        style.configure("Section.TLabel", font=(
+            "Segoe UI Semibold", 11), background=bg, foreground=accent)
+        style.configure("Muted.TLabel", background=bg,
+                        foreground=muted, font=("Segoe UI", 9))
+        style.configure("Chip.TLabel", background=accent_lt,
+                        foreground=accent, font=("Segoe UI Semibold", 9))
 
-        style.configure("TNotebook", background=bg, borderwidth=0, tabmargins=(0, 0, 0, 0))
-        style.configure("TNotebook.Tab", padding=(16, 10), background="#dfe7ef", foreground=text2, font=("Segoe UI Semibold", 10))
+        style.configure("TNotebook", background=bg,
+                        borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", padding=(
+            16, 10), background="#dfe7ef", foreground=text2, font=("Segoe UI Semibold", 10))
         style.map(
             "TNotebook.Tab",
             background=[("selected", surface), ("active", accent_lt)],
@@ -1105,34 +1099,53 @@ class ShopifyUtilitiesApp:
             foreground=[("active", text)],
             relief=[("active", "solid")],
         )
-        style.configure("Accent.TButton", padding=(13, 9), background=accent, foreground="#ffffff", borderwidth=0, relief="flat")
-        style.map("Accent.TButton", background=[("active", accent_hv), ("pressed", "#0b534f")], relief=[("active", "flat")])
-        style.configure("Ghost.TButton", padding=(9, 6), background=bg, foreground=text2, borderwidth=0, relief="flat")
-        style.map("Ghost.TButton", background=[("active", "#e8eef5")], relief=[("active", "flat")])
-        style.configure("Admin.TButton", padding=(10, 8), background="#f3f6fb", foreground=text, borderwidth=1, relief="solid")
-        style.map("Admin.TButton", background=[("active", "#e8eef5"), ("pressed", "#c7d2e0")], foreground=[("active", text)])
-        style.configure("Danger.TButton", padding=(10, 8), background="#fff5f5", foreground=danger, borderwidth=1, relief="solid")
-        style.map("Danger.TButton", background=[("active", "#fee2e2"), ("pressed", "#fecaca")], foreground=[("active", "#b91c1c")])
+        style.configure("Accent.TButton", padding=(
+            13, 9), background=accent, foreground="#ffffff", borderwidth=0, relief="flat")
+        style.map("Accent.TButton", background=[
+                  ("active", accent_hv), ("pressed", "#0b534f")], relief=[("active", "flat")])
+        style.configure("Ghost.TButton", padding=(
+            9, 6), background=bg, foreground=text2, borderwidth=0, relief="flat")
+        style.map("Ghost.TButton", background=[
+                  ("active", "#e8eef5")], relief=[("active", "flat")])
+        style.configure("Admin.TButton", padding=(
+            10, 8), background="#f3f6fb", foreground=text, borderwidth=1, relief="solid")
+        style.map("Admin.TButton", background=[
+                  ("active", "#e8eef5"), ("pressed", "#c7d2e0")], foreground=[("active", text)])
+        style.configure("Danger.TButton", padding=(
+            10, 8), background="#fff5f5", foreground=danger, borderwidth=1, relief="solid")
+        style.map("Danger.TButton", background=[
+                  ("active", "#fee2e2"), ("pressed", "#fecaca")], foreground=[("active", "#b91c1c")])
 
-        style.configure("TLabelframe", background=bg, borderwidth=1, relief="solid", bordercolor=border)
-        style.configure("TLabelframe.Label", background=bg, foreground=accent, font=("Segoe UI Semibold", 10))
+        style.configure("TLabelframe", background=bg,
+                        borderwidth=1, relief="solid", bordercolor=border)
+        style.configure("TLabelframe.Label", background=bg,
+                        foreground=accent, font=("Segoe UI Semibold", 10))
 
-        style.configure("TEntry", fieldbackground=surface, bordercolor=border, insertcolor="#202223")
-        style.configure("TCombobox", fieldbackground=surface, bordercolor=border)
+        style.configure("TEntry", fieldbackground=surface,
+                        bordercolor=border, insertcolor="#202223")
+        style.configure("TCombobox", fieldbackground=surface,
+                        bordercolor=border)
         style.map(
             "TCombobox",
-            fieldbackground=[("readonly", surface), ("readonly focus", surface)],
+            fieldbackground=[("readonly", surface),
+                              ("readonly focus", surface)],
             foreground=[("readonly", text), ("readonly focus", text)],
-            selectbackground=[("readonly", surface), ("readonly focus", surface)],
+            selectbackground=[("readonly", surface),
+                               ("readonly focus", surface)],
             selectforeground=[("readonly", text), ("readonly focus", text)],
         )
 
-        style.configure("Horizontal.TProgressbar", troughcolor="#d8e1ea", background=accent, borderwidth=0, thickness=10)
-        style.configure("App.Horizontal.TProgressbar", troughcolor="#d8e1ea", background=accent, borderwidth=0, thickness=14)
-        style.configure("AppWarm.Horizontal.TProgressbar", troughcolor="#fde68a", background="#f59e0b", borderwidth=0, thickness=14)
-        style.configure("AppInfo.Horizontal.TProgressbar", troughcolor="#bfdbfe", background="#0284c7", borderwidth=0, thickness=14)
+        style.configure("Horizontal.TProgressbar", troughcolor="#d8e1ea",
+                        background=accent, borderwidth=0, thickness=10)
+        style.configure("App.Horizontal.TProgressbar", troughcolor="#d8e1ea",
+                        background=accent, borderwidth=0, thickness=14)
+        style.configure("AppWarm.Horizontal.TProgressbar", troughcolor="#fde68a",
+                        background="#f59e0b", borderwidth=0, thickness=14)
+        style.configure("AppInfo.Horizontal.TProgressbar", troughcolor="#bfdbfe",
+                        background="#0284c7", borderwidth=0, thickness=14)
 
-        style.configure("TScrollbar", troughcolor=surface2, background="#c9cccf", relief="flat", arrowsize=13)
+        style.configure("TScrollbar", troughcolor=surface2,
+                        background="#c9cccf", relief="flat", arrowsize=13)
         style.map("TScrollbar", background=[("active", muted)])
 
         style.configure(
@@ -1151,17 +1164,18 @@ class ShopifyUtilitiesApp:
             font=("Segoe UI Semibold", 10),
             relief="flat",
         )
-        style.map("Treeview", background=[("selected", selected)], foreground=[("selected", accent)])
+        style.map("Treeview", background=[
+                  ("selected", selected)], foreground=[("selected", accent)])
         style.map("Treeview.Heading", background=[("active", border)])
 
         style.configure("TSeparator", background=border)
         style.configure("TCheckbutton", background=bg, foreground=text)
 
     def _build_ui(self) -> None:
-        _SB  = "#0f172a"
+        _SB = "#0f172a"
         _SBH = "#1e293b"
         _SHD = "#020617"
-        _FG  = "#e2e8f0"
+        _FG = "#e2e8f0"
         _FGM = "#94a3b8"
         _ACC = "#0f766e"
         _ACC2 = "#99f6e4"
@@ -1201,7 +1215,7 @@ class ShopifyUtilitiesApp:
             ("\u2b07  Importar theme/datos",       self.open_import_wizard),
             ("\u2b06  Exportar theme/datos",       self.open_export_wizard),
             ("\u25b6  Gestionar contenedores",     self.open_containers_manager),
-            ("\u2139  Guia de usuario",            self.open_app_docs),
+            ("\U0001f4d8  Abrir documentacion",    self.open_docs),
         ]
         nav_f = tk.Frame(sidebar, bg=_SB)
         nav_f.pack(fill="x", pady=(6, 0))
@@ -1216,7 +1230,8 @@ class ShopifyUtilitiesApp:
                 font=("Segoe UI", 10), cursor="hand2", highlightthickness=0,
             )
             btn.pack(fill="x")
-            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=_SBH, fg="#ffffff"))
+            btn.bind("<Enter>", lambda e,
+                     b=btn: b.configure(bg=_SBH, fg="#ffffff"))
             btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=_SB, fg=_FG))
             self.sidebar_nav_buttons.append((btn, label, compact_label))
             self._register_tooltip(btn, label.replace("  ", "\n", 1))
@@ -1263,7 +1278,7 @@ class ShopifyUtilitiesApp:
         shortcuts_right = [
             "Ctrl+L  Crear entorno",
             "Ctrl+B  Compacto",
-            "F1  Ayuda",
+            "F1  Documentacion",
             "Ctrl+Q  Salir",
         ]
 
@@ -1273,14 +1288,17 @@ class ShopifyUtilitiesApp:
         right_col.grid(row=1, column=1, sticky="nw")
 
         for idx, shortcut in enumerate(shortcuts_left):
-            tk.Label(left_col, text=shortcut, fg="#94a3b8", bg=_SB, font=("Segoe UI", 8), anchor="w").pack(anchor="w", pady=1)
+            tk.Label(left_col, text=shortcut, fg="#94a3b8", bg=_SB, font=(
+                "Segoe UI", 8), anchor="w").pack(anchor="w", pady=1)
         for idx, shortcut in enumerate(shortcuts_right):
-            tk.Label(right_col, text=shortcut, fg="#94a3b8", bg=_SB, font=("Segoe UI", 8), anchor="w").pack(anchor="w", pady=1)
+            tk.Label(right_col, text=shortcut, fg="#94a3b8", bg=_SB, font=(
+                "Segoe UI", 8), anchor="w").pack(anchor="w", pady=1)
 
         self.sidebar_shortcuts_frame = shortcuts_f
 
         # Separator
-        tk.Frame(sidebar, bg="#333333", height=1).pack(fill="x", padx=16, pady=(12, 6))
+        tk.Frame(sidebar, bg="#333333", height=1).pack(
+            fill="x", padx=16, pady=(12, 6))
 
         # Close button
         quit_b = tk.Button(
@@ -1291,7 +1309,8 @@ class ShopifyUtilitiesApp:
             font=("Segoe UI", 10), cursor="hand2", highlightthickness=0,
         )
         quit_b.pack(fill="x")
-        quit_b.bind("<Enter>", lambda e: quit_b.configure(bg="#7f1d1d", fg="#fca5a5"))
+        quit_b.bind("<Enter>", lambda e: quit_b.configure(
+            bg="#7f1d1d", fg="#fca5a5"))
         quit_b.bind("<Leave>", lambda e: quit_b.configure(bg=_SB, fg=_FGM))
         self.sidebar_quit_button = quit_b
         self._register_tooltip(quit_b, "Cerrar la aplicacion")
@@ -1314,7 +1333,8 @@ class ShopifyUtilitiesApp:
             justify="left",
         )
         self.sidebar_status_label.pack(side="left", padx=(6, 0))
-        self._register_tooltip(self.sidebar_status_label, "Estado rapido de Docker y la interfaz")
+        self._register_tooltip(self.sidebar_status_label,
+                               "Estado rapido de Docker y la interfaz")
 
         # ── Main content area ────────────────────────────────────────────────
         main = tk.Frame(self.root, bg="#edf2f7")
@@ -1362,12 +1382,14 @@ class ShopifyUtilitiesApp:
         )
         mode_btn.pack(side="left", padx=(10, 0))
         self._register_tooltip(mode_btn, "Alterna entre Docker local y remoto")
-        self._register_tooltip(self.connection_mode_badge, "Modo Docker actual")
+        self._register_tooltip(
+            self.connection_mode_badge, "Modo Docker actual")
         tk.Label(badge_row, textvariable=self.last_refresh_var, fg="#64748b", bg="#f8fafc",
                  font=("Segoe UI", 9)).pack(side="left", padx=(12, 0))
 
         # Thin accent separator under header
-        tk.Frame(main, bg="#0f766e", height=3).grid(row=1, column=0, sticky="ew")
+        tk.Frame(main, bg="#0f766e", height=3).grid(
+            row=1, column=0, sticky="ew")
 
         # Notebook wrapper
         nb_shell = tk.Frame(main, bg="#cbd5e1", padx=1, pady=1)
@@ -1384,11 +1406,11 @@ class ShopifyUtilitiesApp:
         self.tabs.grid(row=0, column=0, sticky="nsew")
 
         container_tab = ttk.Frame(self.tabs, padding=10)
-        volumes_tab  = ttk.Frame(self.tabs, padding=10)
-        profiles_tab  = ttk.Frame(self.tabs, padding=10)
-        networks_tab  = ttk.Frame(self.tabs, padding=10)
-        history_tab   = ttk.Frame(self.tabs, padding=10)
-        logs_tab      = ttk.Frame(self.tabs, padding=10)
+        volumes_tab = ttk.Frame(self.tabs, padding=10)
+        profiles_tab = ttk.Frame(self.tabs, padding=10)
+        networks_tab = ttk.Frame(self.tabs, padding=10)
+        history_tab = ttk.Frame(self.tabs, padding=10)
+        logs_tab = ttk.Frame(self.tabs, padding=10)
 
         self.tabs.add(container_tab, text="  Contenedores  ")
         self.tabs.add(volumes_tab,   text="  Volumenes  ")
@@ -1433,9 +1455,11 @@ class ShopifyUtilitiesApp:
 
         y_scroll = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
         y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll = ttk.Scrollbar(host, orient="horizontal", command=canvas.xview)
+        x_scroll = ttk.Scrollbar(
+            host, orient="horizontal", command=canvas.xview)
         x_scroll.grid(row=1, column=0, sticky="ew")
-        canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        canvas.configure(yscrollcommand=y_scroll.set,
+                         xscrollcommand=x_scroll.set)
 
         content = ttk.Frame(canvas, padding=padding)
         window_id = canvas.create_window((0, 0), window=content, anchor="nw")
@@ -1445,7 +1469,8 @@ class ShopifyUtilitiesApp:
 
         def fit_content_width(event: tk.Event) -> None:
             required_width = content.winfo_reqwidth()
-            canvas.itemconfigure(window_id, width=max(event.width, required_width))
+            canvas.itemconfigure(window_id, width=max(
+                event.width, required_width))
 
         def _on_mouse_wheel(event: tk.Event) -> str:
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -1453,7 +1478,8 @@ class ShopifyUtilitiesApp:
 
         content.bind("<Configure>", sync_scroll_region)
         canvas.bind("<Configure>", fit_content_width)
-        content.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mouse_wheel))
+        content.bind("<Enter>", lambda _e: canvas.bind_all(
+            "<MouseWheel>", _on_mouse_wheel))
         content.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
         self.root.after(50, sync_scroll_region)
         return content
@@ -1485,7 +1511,8 @@ class ShopifyUtilitiesApp:
         progress_var: tk.DoubleVar,
         style_name: str = "App.Horizontal.TProgressbar",
     ) -> tuple[tk.Frame, tk.StringVar]:
-        panel = tk.Frame(parent, bg="#f8fafc", padx=14, pady=12, highlightthickness=1, highlightbackground="#d8e1ea")
+        panel = tk.Frame(parent, bg="#f8fafc", padx=14, pady=12,
+                         highlightthickness=1, highlightbackground="#d8e1ea")
         panel.columnconfigure(0, weight=1)
 
         header = tk.Frame(panel, bg="#f8fafc")
@@ -1549,9 +1576,11 @@ class ShopifyUtilitiesApp:
             messagebox.showerror("Docker", self._docker_unavailable_message())
             return
 
-        window = self._open_or_focus_work_tab("container_admin", "Gestion contenedores")
+        window = self._open_or_focus_work_tab(
+            "container_admin", "Gestion contenedores")
         if window is None:
-            messagebox.showerror("Interfaz", "No se pudo abrir la pestaña de gestión de contenedores.")
+            messagebox.showerror(
+                "Interfaz", "No se pudo abrir la pestaña de gestión de contenedores.")
             return
 
         for child in window.winfo_children():
@@ -1561,7 +1590,8 @@ class ShopifyUtilitiesApp:
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
-        self._add_work_tab_header(outer, "Gestión avanzada de contenedores", "container_admin")
+        self._add_work_tab_header(
+            outer, "Gestión avanzada de contenedores", "container_admin")
 
         table_frame = ttk.Frame(outer)
         table_frame.grid(row=1, column=0, sticky="nsew")
@@ -1570,7 +1600,8 @@ class ShopifyUtilitiesApp:
         table_frame.rowconfigure(1, weight=0)
 
         cols = ("name", "state", "image", "ports", "protection")
-        self.container_admin_tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        self.container_admin_tree = ttk.Treeview(
+            table_frame, columns=cols, show="headings", selectmode="browse")
         self.container_admin_tree.heading("name", text="Contenedor")
         self.container_admin_tree.heading("state", text="Estado")
         self.container_admin_tree.heading("image", text="Imagen")
@@ -1583,22 +1614,33 @@ class ShopifyUtilitiesApp:
         self.container_admin_tree.column("protection", width=320, anchor="w")
         self.container_admin_tree.grid(row=0, column=0, sticky="nsew")
 
-        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.container_admin_tree.yview)
+        yscroll = ttk.Scrollbar(
+            table_frame, orient="vertical", command=self.container_admin_tree.yview)
         yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.container_admin_tree.xview)
+        xscroll = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=self.container_admin_tree.xview)
         xscroll.grid(row=1, column=0, sticky="ew")
-        self.container_admin_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.container_admin_tree.configure(
+            yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
 
         actions = ttk.Frame(outer)
         actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(actions, text="Refrescar", command=self._refresh_container_admin_table, style="Admin.TButton").pack(side="left")
-        ttk.Button(actions, text="Renombrar", command=self._rename_container_admin, style="Admin.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="Borrar", command=self._delete_container_admin, style="Danger.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="Arrancar", command=lambda: self._toggle_container_admin("start"), style="Admin.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="Apagar", command=lambda: self._toggle_container_admin("stop"), style="Admin.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="Seleccionar tema activo", command=self._select_active_theme_admin, style="Admin.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="Borrar tema", command=self._delete_theme_admin, style="Danger.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="Acceso Remoto (SSH)", command=self._remote_access_container_admin, style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Refrescar", command=self._refresh_container_admin_table,
+                   style="Admin.TButton").pack(side="left")
+        ttk.Button(actions, text="Renombrar", command=self._rename_container_admin,
+                   style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Borrar", command=self._delete_container_admin,
+                   style="Danger.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Arrancar", command=lambda: self._toggle_container_admin(
+            "start"), style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Apagar", command=lambda: self._toggle_container_admin(
+            "stop"), style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Seleccionar tema activo", command=self._select_active_theme_admin,
+                   style="Admin.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Borrar tema", command=self._delete_theme_admin,
+                   style="Danger.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="Acceso Remoto (SSH)", command=self._remote_access_container_admin,
+                   style="Admin.TButton").pack(side="left", padx=6)
 
         self._refresh_container_admin_table()
 
@@ -1609,13 +1651,16 @@ class ShopifyUtilitiesApp:
         for item in self.container_admin_tree.get_children():
             self.container_admin_tree.delete(item)
 
-        code, out, err = self._run(["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Image}}|{{.Ports}}|{{.Command}}"])
+        code, out, err = self._run(["docker", "ps", "-a", "--format",
+                                   "{{.Names}}|{{.Status}}|{{.Image}}|{{.Ports}}|{{.Command}}"])
         if code != 0:
-            messagebox.showwarning("Contenedores", err or "No se pudieron listar contenedores.")
+            messagebox.showwarning(
+                "Contenedores", err or "No se pudieron listar contenedores.")
             return
 
         if not out.strip():
-            self.container_admin_tree.insert("", "end", values=("(sin contenedores Shopify)", "-", "-", "-", "-"))
+            self.container_admin_tree.insert("", "end", values=(
+                "(sin contenedores Shopify)", "-", "-", "-", "-"))
             return
 
         shopify_found = False
@@ -1640,10 +1685,12 @@ class ShopifyUtilitiesApp:
             service_tag = self._container_service_tag(name, image)
             if service_tag:
                 tags.append(service_tag)
-            self.container_admin_tree.insert("", "end", values=(name, state, image, ports, protection), tags=tuple(tags))
-        
+            self.container_admin_tree.insert("", "end", values=(
+                name, state, image, ports, protection), tags=tuple(tags))
+
         if not shopify_found:
-            self.container_admin_tree.insert("", "end", values=("(sin contenedores Shopify)", "-", "-", "-", "-"))
+            self.container_admin_tree.insert("", "end", values=(
+                "(sin contenedores Shopify)", "-", "-", "-", "-"))
 
     def _selected_container_admin(self) -> str | None:
         if self.container_admin_tree is None or not self.container_admin_tree.winfo_exists():
@@ -1662,10 +1709,12 @@ class ShopifyUtilitiesApp:
     def _rename_container_admin(self) -> None:
         container = self._selected_container_admin()
         if not container:
-            messagebox.showwarning("Contenedores", "Selecciona un contenedor para renombrar.")
+            messagebox.showwarning(
+                "Contenedores", "Selecciona un contenedor para renombrar.")
             return
 
-        new_name = simpledialog.askstring("Renombrar contenedor", f"Nuevo nombre para '{container}':", initialvalue=container)
+        new_name = simpledialog.askstring(
+            "Renombrar contenedor", f"Nuevo nombre para '{container}':", initialvalue=container)
         if not new_name:
             return
         new_name = new_name.strip()
@@ -1676,28 +1725,34 @@ class ShopifyUtilitiesApp:
         def _rename_container_operation():
             code, _, err = self._run(["docker", "rename", container, new_name])
             if code != 0:
-                raise RuntimeError(err or "No se pudo renombrar el contenedor.")
+                raise RuntimeError(
+                    err or "No se pudo renombrar el contenedor.")
 
-            self.log_event("CONTAINER", container, "OK", f"Renombrado a {new_name}")
+            self.log_event("CONTAINER", container, "OK",
+                           f"Renombrado a {new_name}")
             self.refresh_everything()
             self._refresh_container_admin_table()
             return True
-        
-        self._run_with_loading_modal(f"Renombrando contenedor {container} a {new_name}", _rename_container_operation)
+
+        self._run_with_loading_modal(
+            f"Renombrando contenedor {container} a {new_name}", _rename_container_operation)
 
     def _delete_container_admin(self) -> None:
         container = self._selected_container_admin()
         if not container:
-            messagebox.showwarning("Contenedores", "Selecciona un contenedor para borrar.")
+            messagebox.showwarning(
+                "Contenedores", "Selecciona un contenedor para borrar.")
             return
 
         matches = self._profiles_containing_container(container)
         if matches:
             scope_lines: list[str] = []
             if matches.get("privado"):
-                scope_lines.append("Perfiles privados: " + ", ".join(matches["privado"]))
+                scope_lines.append("Perfiles privados: " +
+                                   ", ".join(matches["privado"]))
             if matches.get("remoto"):
-                scope_lines.append("Perfiles remotos: " + ", ".join(matches["remoto"]))
+                scope_lines.append("Perfiles remotos: " +
+                                   ", ".join(matches["remoto"]))
 
             confirm_remove = messagebox.askyesno(
                 "Contenedores",
@@ -1714,13 +1769,17 @@ class ShopifyUtilitiesApp:
                 )
                 return
 
-            removed_ok, remove_error = self._remove_container_from_profile_scopes(container, matches)
+            removed_ok, remove_error = self._remove_container_from_profile_scopes(
+                container, matches)
             if not removed_ok:
-                messagebox.showerror("Contenedores", remove_error or "No se pudo quitar el contenedor de los perfiles.")
+                messagebox.showerror(
+                    "Contenedores", remove_error or "No se pudo quitar el contenedor de los perfiles.")
                 return
 
-            removed_scopes = ", ".join([k for k in ("privado", "remoto") if matches.get(k)])
-            self.log_event("CONTAINER", container, "OK", f"Quitado de perfiles antes de borrar ({removed_scopes})")
+            removed_scopes = ", ".join(
+                [k for k in ("privado", "remoto") if matches.get(k)])
+            self.log_event("CONTAINER", container, "OK",
+                           f"Quitado de perfiles antes de borrar ({removed_scopes})")
 
         if not messagebox.askyesno("Contenedores", f"Eliminar contenedor '{container}'?\n\nSe forzará parada si está arrancado."):
             return
@@ -1729,15 +1788,18 @@ class ShopifyUtilitiesApp:
             code, out, err = self._run(["docker", "rm", "-f", container])
             if code != 0:
                 details = err or out or f"Docker devolvio codigo {code} sin detalle."
-                raise RuntimeError(f"No se pudo borrar el contenedor.\n\n{details}")
+                raise RuntimeError(
+                    f"No se pudo borrar el contenedor.\n\n{details}")
 
-            self.log_event("CONTAINER", container, "OK", "Eliminado desde gestor avanzado")
+            self.log_event("CONTAINER", container, "OK",
+                           "Eliminado desde gestor avanzado")
             self.refresh_everything()
             self.refresh_profiles_ui(force=True)
             self._refresh_container_admin_table()
             return True
-        
-        self._run_with_loading_modal(f"Eliminando contenedor {container}", _delete_container_operation)
+
+        self._run_with_loading_modal(
+            f"Eliminando contenedor {container}", _delete_container_operation)
 
     def _toggle_container_admin(self, mode: str) -> None:
         container = self._selected_container_admin()
@@ -1752,10 +1814,12 @@ class ShopifyUtilitiesApp:
             code, _, err = self._run(["docker", action, container])
             if code != 0:
                 raise RuntimeError(err or f"No se pudo {action} {container}.")
-            self.log_event("CONTAINER", container, "OK", f"Contenedor {estado} desde gestor avanzado")
+            self.log_event("CONTAINER", container, "OK",
+                           f"Contenedor {estado} desde gestor avanzado")
             self.refresh_everything()
             self._refresh_container_admin_table()
-            messagebox.showinfo("Contenedores", f"Contenedor {estado}: {container}")
+            messagebox.showinfo(
+                "Contenedores", f"Contenedor {estado}: {container}")
             return True
 
         self._run_with_loading_modal(
@@ -1767,21 +1831,24 @@ class ShopifyUtilitiesApp:
     def _select_active_theme_admin(self) -> None:
         container = self._selected_container_admin()
         if not container:
-            messagebox.showwarning("Tema activo", "Selecciona un contenedor Shopify.")
+            messagebox.showwarning(
+                "Tema activo", "Selecciona un contenedor Shopify.")
             return
         self._select_active_theme_for_container(container)
 
     def _delete_theme_admin(self) -> None:
         container = self._selected_container_admin()
         if not container:
-            messagebox.showwarning("Borrar tema", "Selecciona un contenedor Shopify.")
+            messagebox.showwarning(
+                "Borrar tema", "Selecciona un contenedor Shopify.")
             return
         self._delete_theme_for_container(container)
 
     def _remote_access_container_admin(self) -> None:
         container = self._selected_container_admin()
         if not container:
-            messagebox.showwarning("Contenedores", "Selecciona un contenedor para el acceso remoto.")
+            messagebox.showwarning(
+                "Contenedores", "Selecciona un contenedor para el acceso remoto.")
             return
         self._remote_access_impl(container)
 
@@ -1791,9 +1858,11 @@ class ShopifyUtilitiesApp:
             return
 
         # Verificar si el contenedor está encendido
-        c_code, c_out, _ = self._run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        c_code, c_out, _ = self._run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", container])
         if c_code != 0 or c_out.strip().lower() != "true":
-            messagebox.showwarning("Acceso Remoto", f"El contenedor '{container}' debe estar encendido para habilitar el acceso remoto.")
+            messagebox.showwarning(
+                "Acceso Remoto", f"El contenedor '{container}' debe estar encendido para habilitar el acceso remoto.")
             return
 
         # Detectar el puerto 8080 mapeado en el host para este contenedor
@@ -1816,11 +1885,13 @@ class ShopifyUtilitiesApp:
         codeserver_url = f"http://{access_host}:{host_port}"
 
         # Verificar si code-server ya está corriendo dentro del contenedor
-        _, ps_out, _ = self._run(["docker", "exec", container, "sh", "-c", "pgrep -f code-server || echo ''"])
+        _, ps_out, _ = self._run(
+            ["docker", "exec", container, "sh", "-c", "pgrep -f code-server || echo ''"])
         already_running = bool((ps_out or "").strip())
 
         if already_running:
-            self._show_codeserver_instructions(container, codeserver_url, host_port)
+            self._show_codeserver_instructions(
+                container, codeserver_url, host_port)
             return
 
         confirm = messagebox.askyesno(
@@ -1848,14 +1919,19 @@ class ShopifyUtilitiesApp:
         )
 
         def run_codeserver():
-            self.log_event("REMOTE-ACCESS", container, "INFO", "Iniciando code-server (sin contraseña)...")
-            code, out, err = self._run(["docker", "exec", "-d", container, "sh", "-c", install_and_run])
+            self.log_event("REMOTE-ACCESS", container, "INFO",
+                           "Iniciando code-server (sin contraseña)...")
+            code, out, err = self._run(
+                ["docker", "exec", "-d", container, "sh", "-c", install_and_run])
             if code == 0:
                 time.sleep(3)
-                self.root.after(0, lambda: __import__("webbrowser").open(codeserver_url))
-                self.root.after(0, lambda: self._show_codeserver_instructions(container, codeserver_url, host_port))
+                self.root.after(0, lambda: __import__(
+                    "webbrowser").open(codeserver_url))
+                self.root.after(0, lambda: self._show_codeserver_instructions(
+                    container, codeserver_url, host_port))
             else:
-                self.root.after(0, lambda: messagebox.showerror("Acceso Remoto", f"Error al lanzar code-server: {err or 'desconocido'}"))
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Acceso Remoto", f"Error al lanzar code-server: {err or 'desconocido'}"))
 
         threading.Thread(target=run_codeserver, daemon=True).start()
 
@@ -1891,7 +1967,8 @@ class ShopifyUtilitiesApp:
         table_frame.rowconfigure(1, weight=0)
 
         columns = ("name", "state", "health", "port", "protection")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=14, selectmode="extended")
+        self.tree = ttk.Treeview(
+            table_frame, columns=columns, show="headings", height=14, selectmode="extended")
         self.tree.heading("name", text="Contenedor")
         self.tree.heading("state", text="Estado")
         self.tree.heading("health", text="Salud")
@@ -1907,16 +1984,20 @@ class ShopifyUtilitiesApp:
         self.tree.tag_configure("stopped",   foreground="#ef4444")
         self.tree.tag_configure("unhealthy", foreground="#d97706")
 
-        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        yscroll = ttk.Scrollbar(
+            table_frame, orient="vertical", command=self.tree.yview)
         yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        xscroll = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=self.tree.xview)
         xscroll.grid(row=1, column=0, sticky="ew")
-        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.tree.configure(yscrollcommand=yscroll.set,
+                            xscrollcommand=xscroll.set)
 
         action_row = ttk.Frame(parent)
         action_row.grid(row=1, column=0, sticky="ew", pady=(10, 4))
 
-        ttk.Button(action_row, text="Refrescar", command=self.refresh_everything).pack(side="left", padx=(0, 6))
+        ttk.Button(action_row, text="Refrescar", command=self.refresh_everything).pack(
+            side="left", padx=(0, 6))
         self.container_action_btns = []
         for _lbl, _cmd in [
             ("Arrancar seleccionados", self.start_selected),
@@ -1940,7 +2021,8 @@ class ShopifyUtilitiesApp:
         top.columnconfigure(3, weight=1)
         top.columnconfigure(4, weight=1)
 
-        ttk.Label(top, text="Almacen:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(top, text="Almacen:").grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
         scope_combo = ttk.Combobox(
             top,
             textvariable=self.profile_scope_var,
@@ -1952,19 +2034,28 @@ class ShopifyUtilitiesApp:
         scope_combo.grid(row=0, column=1, sticky="w")
         scope_combo.bind("<<ComboboxSelected>>", self.on_profile_scope_changed)
 
-        ttk.Label(top, text="Nombre perfil:").grid(row=0, column=2, sticky="w", padx=(12, 6))
-        ttk.Entry(top, textvariable=self.profile_name_var).grid(row=0, column=3, columnspan=2, sticky="ew")
+        ttk.Label(top, text="Nombre perfil:").grid(
+            row=0, column=2, sticky="w", padx=(12, 6))
+        ttk.Entry(top, textvariable=self.profile_name_var).grid(
+            row=0, column=3, columnspan=2, sticky="ew")
 
-        ttk.Button(top, text="Guardar/Actualizar", command=self.save_profile).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(8, 0))
-        ttk.Button(top, text="Quitar del perfil", command=self.remove_selected_from_profile).grid(row=1, column=1, sticky="ew", padx=6, pady=(8, 0))
-        ttk.Button(top, text="Eliminar", command=self.delete_profile).grid(row=1, column=2, sticky="ew", padx=6, pady=(8, 0))
-        self.copy_profile_btn = ttk.Button(top, text="Copiar a remoto", command=self.copy_selected_profile)
-        self.copy_profile_btn.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Button(top, text="Guardar/Actualizar", command=self.save_profile).grid(
+            row=1, column=0, sticky="ew", padx=(0, 6), pady=(8, 0))
+        ttk.Button(top, text="Quitar del perfil", command=self.remove_selected_from_profile).grid(
+            row=1, column=1, sticky="ew", padx=6, pady=(8, 0))
+        ttk.Button(top, text="Eliminar", command=self.delete_profile).grid(
+            row=1, column=2, sticky="ew", padx=6, pady=(8, 0))
+        self.copy_profile_btn = ttk.Button(
+            top, text="Copiar a remoto", command=self.copy_selected_profile)
+        self.copy_profile_btn.grid(
+            row=2, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
         self.profile_action_btns = []
-        _btn_start = ttk.Button(top, text="Arrancar perfil", command=lambda: self.run_selected_profile("start"))
+        _btn_start = ttk.Button(top, text="Arrancar perfil",
+                                command=lambda: self.run_selected_profile("start"))
         _btn_start.grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
         self.profile_action_btns.append(_btn_start)
-        _btn_stop = ttk.Button(top, text="Apagar perfil", command=lambda: self.run_selected_profile("stop"))
+        _btn_stop = ttk.Button(top, text="Apagar perfil",
+                               command=lambda: self.run_selected_profile("stop"))
         _btn_stop.grid(row=2, column=2, sticky="ew", padx=6, pady=(6, 0))
         self.profile_action_btns.append(_btn_stop)
 
@@ -1976,7 +2067,8 @@ class ShopifyUtilitiesApp:
 
         self.profiles_header_label = ttk.Label(body, text="Perfiles privados")
         self.profiles_header_label.grid(row=0, column=0, sticky="w")
-        ttk.Label(body, text="Contenedores del perfil").grid(row=0, column=1, sticky="w")
+        ttk.Label(body, text="Contenedores del perfil").grid(
+            row=0, column=1, sticky="w")
 
         self.profiles_listbox = tk.Listbox(
             body, exportselection=False,
@@ -1985,7 +2077,8 @@ class ShopifyUtilitiesApp:
             activestyle="none",
         )
         self.profiles_listbox.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        self.profiles_listbox.bind("<<ListboxSelect>>", self.on_profile_selected)
+        self.profiles_listbox.bind(
+            "<<ListboxSelect>>", self.on_profile_selected)
 
         self.profile_containers_listbox = tk.Listbox(
             body, selectmode="extended", exportselection=False,
@@ -1993,13 +2086,17 @@ class ShopifyUtilitiesApp:
             relief="solid", borderwidth=1, highlightthickness=0, font=("Segoe UI", 10),
             activestyle="none",
         )
-        self.profile_containers_listbox.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.profile_containers_listbox.grid(
+            row=1, column=1, sticky="nsew", padx=(6, 0))
 
         bottom = ttk.Frame(parent)
         bottom.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(bottom, text="Refrescar perfiles", command=lambda: self.refresh_profiles_ui(force=True)).pack(side="left")
-        ttk.Button(bottom, text="Limpiar seleccion", command=self.clear_profile_editor).pack(side="left", padx=6)
-        self.profiles_loading_label = ttk.Label(bottom, text="", style="Muted.TLabel")
+        ttk.Button(bottom, text="Refrescar perfiles",
+                   command=lambda: self.refresh_profiles_ui(force=True)).pack(side="left")
+        ttk.Button(bottom, text="Limpiar seleccion",
+                   command=self.clear_profile_editor).pack(side="left", padx=6)
+        self.profiles_loading_label = ttk.Label(
+            bottom, text="", style="Muted.TLabel")
         self.profiles_loading_label.pack(side="left", padx=(10, 0))
 
     def _build_networks_tab(self, parent: ttk.Frame) -> None:
@@ -2010,7 +2107,8 @@ class ShopifyUtilitiesApp:
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.columnconfigure(0, weight=1)
 
-        ttk.Button(top, text="Refrescar networks", command=self.refresh_networks_with_modal).pack(side="left")
+        ttk.Button(top, text="Refrescar networks",
+                   command=self.refresh_networks_with_modal).pack(side="left")
         ttk.Label(top, text="Driver:").pack(side="left", padx=(14, 6))
         ttk.Combobox(
             top,
@@ -2019,9 +2117,12 @@ class ShopifyUtilitiesApp:
             state="readonly",
             width=10,
         ).pack(side="left")
-        ttk.Button(top, text="Crear network", command=self.create_network).pack(side="left", padx=6)
-        ttk.Button(top, text="Renombrar network", command=self.rename_network).pack(side="left", padx=6)
-        ttk.Button(top, text="Eliminar network", command=self.delete_network).pack(side="left", padx=6)
+        ttk.Button(top, text="Crear network",
+                   command=self.create_network).pack(side="left", padx=6)
+        ttk.Button(top, text="Renombrar network",
+                   command=self.rename_network).pack(side="left", padx=6)
+        ttk.Button(top, text="Eliminar network",
+                   command=self.delete_network).pack(side="left", padx=6)
 
         body = ttk.Frame(parent)
         body.grid(row=1, column=0, sticky="nsew")
@@ -2030,9 +2131,11 @@ class ShopifyUtilitiesApp:
         body.rowconfigure(1, weight=1)
 
         ttk.Label(body, text="Networks").grid(row=0, column=0, sticky="w")
-        ttk.Label(body, text="Contenedores conectados").grid(row=0, column=1, sticky="w")
+        ttk.Label(body, text="Contenedores conectados").grid(
+            row=0, column=1, sticky="w")
 
-        self.networks_tree = ttk.Treeview(body, columns=("name", "driver", "count"), show="headings", height=12)
+        self.networks_tree = ttk.Treeview(body, columns=(
+            "name", "driver", "count"), show="headings", height=12)
         self.networks_tree.heading("name", text="Network")
         self.networks_tree.heading("driver", text="Driver")
         self.networks_tree.heading("count", text="Contenedores")
@@ -2042,11 +2145,15 @@ class ShopifyUtilitiesApp:
         self.networks_tree.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         self.networks_tree.bind("<<TreeviewSelect>>", self.on_network_selected)
 
-        networks_y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.networks_tree.yview)
+        networks_y_scroll = ttk.Scrollbar(
+            body, orient="vertical", command=self.networks_tree.yview)
         networks_y_scroll.grid(row=1, column=0, sticky="nse", padx=(0, 6))
-        networks_x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.networks_tree.xview)
-        networks_x_scroll.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
-        self.networks_tree.configure(yscrollcommand=networks_y_scroll.set, xscrollcommand=networks_x_scroll.set)
+        networks_x_scroll = ttk.Scrollbar(
+            body, orient="horizontal", command=self.networks_tree.xview)
+        networks_x_scroll.grid(
+            row=2, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
+        self.networks_tree.configure(
+            yscrollcommand=networks_y_scroll.set, xscrollcommand=networks_x_scroll.set)
 
         self.network_containers_listbox = tk.Listbox(
             body, exportselection=False,
@@ -2054,17 +2161,20 @@ class ShopifyUtilitiesApp:
             relief="solid", borderwidth=1, highlightthickness=0, font=("Segoe UI", 10),
             activestyle="none",
         )
-        self.network_containers_listbox.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.network_containers_listbox.grid(
+            row=1, column=1, sticky="nsew", padx=(6, 0))
         self.network_containers_listbox.bind("<Button-1>", lambda _e: "break")
         self.network_containers_listbox.bind("<B1-Motion>", lambda _e: "break")
-        self.network_containers_listbox.bind("<ButtonRelease-1>", lambda _e: "break")
+        self.network_containers_listbox.bind(
+            "<ButtonRelease-1>", lambda _e: "break")
         self.network_containers_listbox.bind("<Key>", lambda _e: "break")
 
         action = ttk.Frame(parent)
         action.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         action.columnconfigure(1, weight=1)
 
-        ttk.Label(action, text="Contenedor objetivo:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(action, text="Contenedor objetivo:").grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
         self.network_container_combo = ttk.Combobox(
             action,
             textvariable=self.network_container_var,
@@ -2072,10 +2182,13 @@ class ShopifyUtilitiesApp:
             values=[],
         )
         self.network_container_combo.grid(row=0, column=1, sticky="ew")
-        ttk.Button(action, text="Conectar", command=self.connect_container_to_network).grid(row=0, column=2, padx=6)
-        ttk.Button(action, text="Desconectar", command=self.disconnect_container_from_network).grid(row=0, column=3)
+        ttk.Button(action, text="Conectar", command=self.connect_container_to_network).grid(
+            row=0, column=2, padx=6)
+        ttk.Button(action, text="Desconectar",
+                   command=self.disconnect_container_from_network).grid(row=0, column=3)
 
-        ttk.Label(action, text="Seleccion multiple:").grid(row=1, column=0, sticky="nw", padx=(0, 6), pady=(8, 0))
+        ttk.Label(action, text="Seleccion multiple:").grid(
+            row=1, column=0, sticky="nw", padx=(0, 6), pady=(8, 0))
         self.network_targets_listbox = tk.Listbox(
             action,
             selectmode="extended",
@@ -2091,7 +2204,8 @@ class ShopifyUtilitiesApp:
             font=("Segoe UI", 10),
             activestyle="none",
         )
-        self.network_targets_listbox.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        self.network_targets_listbox.grid(
+            row=1, column=1, sticky="ew", pady=(8, 0))
 
     def _build_volumes_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -2101,7 +2215,8 @@ class ShopifyUtilitiesApp:
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.columnconfigure(0, weight=1)
 
-        ttk.Button(top, text="Refrescar volumes", command=self.refresh_volumes_with_modal).pack(side="left")
+        ttk.Button(top, text="Refrescar volumes",
+                   command=self.refresh_volumes_with_modal).pack(side="left")
         ttk.Label(top, text="Driver:").pack(side="left", padx=(14, 6))
         ttk.Combobox(
             top,
@@ -2110,12 +2225,18 @@ class ShopifyUtilitiesApp:
             state="readonly",
             width=10,
         ).pack(side="left")
-        ttk.Button(top, text="Crear volume", command=self.create_volume).pack(side="left", padx=6)
-        ttk.Button(top, text="Inspeccionar", command=self.inspect_selected_volumes).pack(side="left", padx=6)
-        ttk.Button(top, text="Clonar volume", command=self.clone_volume).pack(side="left", padx=6)
-        ttk.Button(top, text="Vaciar volume", command=self.clear_volume_contents).pack(side="left", padx=6)
-        ttk.Button(top, text="Eliminar volume", command=self.delete_selected_volumes).pack(side="left", padx=6)
-        ttk.Button(top, text="Prune volumes", command=self.prune_volumes).pack(side="left", padx=6)
+        ttk.Button(top, text="Crear volume", command=self.create_volume).pack(
+            side="left", padx=6)
+        ttk.Button(top, text="Inspeccionar", command=self.inspect_selected_volumes).pack(
+            side="left", padx=6)
+        ttk.Button(top, text="Clonar volume",
+                   command=self.clone_volume).pack(side="left", padx=6)
+        ttk.Button(top, text="Vaciar volume", command=self.clear_volume_contents).pack(
+            side="left", padx=6)
+        ttk.Button(top, text="Eliminar volume",
+                   command=self.delete_selected_volumes).pack(side="left", padx=6)
+        ttk.Button(top, text="Prune volumes",
+                   command=self.prune_volumes).pack(side="left", padx=6)
 
         body = ttk.Frame(parent)
         body.grid(row=1, column=0, sticky="nsew")
@@ -2124,7 +2245,8 @@ class ShopifyUtilitiesApp:
         body.rowconfigure(1, weight=1)
 
         ttk.Label(body, text="Volumes").grid(row=0, column=0, sticky="w")
-        ttk.Label(body, text="Contenedores que usan el volume").grid(row=0, column=1, sticky="w")
+        ttk.Label(body, text="Contenedores que usan el volume").grid(
+            row=0, column=1, sticky="w")
 
         self.volumes_tree = ttk.Treeview(
             body,
@@ -2146,11 +2268,15 @@ class ShopifyUtilitiesApp:
         self.volumes_tree.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         self.volumes_tree.bind("<<TreeviewSelect>>", self.on_volume_selected)
 
-        volumes_y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.volumes_tree.yview)
+        volumes_y_scroll = ttk.Scrollbar(
+            body, orient="vertical", command=self.volumes_tree.yview)
         volumes_y_scroll.grid(row=1, column=0, sticky="nse", padx=(0, 6))
-        volumes_x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.volumes_tree.xview)
-        volumes_x_scroll.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
-        self.volumes_tree.configure(yscrollcommand=volumes_y_scroll.set, xscrollcommand=volumes_x_scroll.set)
+        volumes_x_scroll = ttk.Scrollbar(
+            body, orient="horizontal", command=self.volumes_tree.xview)
+        volumes_x_scroll.grid(row=2, column=0, sticky="ew",
+                              padx=(0, 6), pady=(4, 0))
+        self.volumes_tree.configure(
+            yscrollcommand=volumes_y_scroll.set, xscrollcommand=volumes_x_scroll.set)
 
         self.volume_containers_listbox = tk.Listbox(
             body,
@@ -2165,10 +2291,12 @@ class ShopifyUtilitiesApp:
             font=("Segoe UI", 10),
             activestyle="none",
         )
-        self.volume_containers_listbox.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.volume_containers_listbox.grid(
+            row=1, column=1, sticky="nsew", padx=(6, 0))
         self.volume_containers_listbox.bind("<Button-1>", lambda _e: "break")
         self.volume_containers_listbox.bind("<B1-Motion>", lambda _e: "break")
-        self.volume_containers_listbox.bind("<ButtonRelease-1>", lambda _e: "break")
+        self.volume_containers_listbox.bind(
+            "<ButtonRelease-1>", lambda _e: "break")
         self.volume_containers_listbox.bind("<Key>", lambda _e: "break")
 
     def _build_history_tab(self, parent: ttk.Frame) -> None:
@@ -2179,7 +2307,8 @@ class ShopifyUtilitiesApp:
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.columnconfigure(3, weight=1)
 
-        ttk.Label(top, text="Nivel:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(top, text="Nivel:").grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
         level_combo = ttk.Combobox(
             top,
             textvariable=self.history_level_var,
@@ -2191,14 +2320,18 @@ class ShopifyUtilitiesApp:
         level_combo.grid(row=0, column=1, sticky="w")
         level_combo.bind("<<ComboboxSelected>>", self.apply_history_filter)
 
-        ttk.Label(top, text="Buscar:").grid(row=0, column=2, sticky="w", padx=(12, 6))
+        ttk.Label(top, text="Buscar:").grid(
+            row=0, column=2, sticky="w", padx=(12, 6))
         search = ttk.Entry(top, textvariable=self.history_search_var)
         search.grid(row=0, column=3, sticky="ew")
         search.bind("<KeyRelease>", self.apply_history_filter)
 
-        ttk.Button(top, text="Refrescar", command=self.refresh_history).grid(row=0, column=4, padx=6)
-        ttk.Button(top, text="Limpiar filtro", command=self.clear_history_filters).grid(row=0, column=5, padx=(0, 6))
-        ttk.Button(top, text="Copiar visible", command=self.copy_visible_history).grid(row=0, column=6)
+        ttk.Button(top, text="Refrescar", command=self.refresh_history).grid(
+            row=0, column=4, padx=6)
+        ttk.Button(top, text="Limpiar filtro", command=self.clear_history_filters).grid(
+            row=0, column=5, padx=(0, 6))
+        ttk.Button(top, text="Copiar visible",
+                   command=self.copy_visible_history).grid(row=0, column=6)
 
         # Body: text widget + spinner overlay stacked in a container
         body_container = ttk.Frame(parent)
@@ -2226,18 +2359,21 @@ class ShopifyUtilitiesApp:
         )
         self.history_text.grid(row=0, column=0, sticky="nsew")
 
-        y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.history_text.yview)
+        y_scroll = ttk.Scrollbar(
+            body, orient="vertical", command=self.history_text.yview)
         y_scroll.grid(row=0, column=1, sticky="ns")
         self.history_text.configure(yscrollcommand=y_scroll.set)
 
-        x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.history_text.xview)
+        x_scroll = ttk.Scrollbar(
+            body, orient="horizontal", command=self.history_text.xview)
         x_scroll.grid(row=1, column=0, sticky="ew")
         self.history_text.configure(xscrollcommand=x_scroll.set)
 
         self.history_text.configure(state="disabled")
 
         # ── Spinner overlay (visible solo mientras carga) ──────────────────
-        self._history_spinner_frame: tk.Frame = tk.Frame(body_container, bg="#ffffff")
+        self._history_spinner_frame: tk.Frame = tk.Frame(
+            body_container, bg="#ffffff")
         self._history_spinner_job: str | None = None
         self._history_spinner_index: int = 0
 
@@ -2269,7 +2405,8 @@ class ShopifyUtilitiesApp:
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.columnconfigure(1, weight=1)
 
-        ttk.Label(top, text="Contenedor:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(top, text="Contenedor:").grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
         self.log_container_combo = ttk.Combobox(
             top,
             textvariable=self.log_container_var,
@@ -2278,8 +2415,10 @@ class ShopifyUtilitiesApp:
         )
         self.log_container_combo.grid(row=0, column=1, sticky="ew")
 
-        ttk.Label(top, text="Lineas:").grid(row=0, column=2, sticky="w", padx=(12, 6))
-        self.log_lines_spinbox = tk.Spinbox(top, from_=10, to=5000, increment=10, textvariable=self.log_lines_var, width=8)
+        ttk.Label(top, text="Lineas:").grid(
+            row=0, column=2, sticky="w", padx=(12, 6))
+        self.log_lines_spinbox = tk.Spinbox(
+            top, from_=10, to=5000, increment=10, textvariable=self.log_lines_var, width=8)
         self.log_lines_spinbox.grid(row=0, column=3, sticky="w")
         self.log_lines_spinbox.configure(
             background="#ffffff",
@@ -2289,11 +2428,16 @@ class ShopifyUtilitiesApp:
             borderwidth=1,
         )
 
-        ttk.Button(top, text="Ver logs", command=self.fetch_logs).grid(row=0, column=4, padx=6)
-        ttk.Checkbutton(top, text="Seguir (-f)", variable=self.log_follow_var, command=self.on_follow_mode_toggled).grid(row=0, column=5, padx=6)
-        ttk.Checkbutton(top, text="Auto-refresco", variable=self.log_auto_refresh_var, command=self.toggle_logs_auto_refresh).grid(row=0, column=6, padx=6)
-        ttk.Button(top, text="Exportar txt", command=self.export_visible_logs).grid(row=0, column=7, padx=(6, 0))
-        ttk.Button(top, text="Copiar visible", command=self.copy_visible_logs).grid(row=0, column=8, padx=(6, 0))
+        ttk.Button(top, text="Ver logs", command=self.fetch_logs).grid(
+            row=0, column=4, padx=6)
+        ttk.Checkbutton(top, text="Seguir (-f)", variable=self.log_follow_var,
+                        command=self.on_follow_mode_toggled).grid(row=0, column=5, padx=6)
+        ttk.Checkbutton(top, text="Auto-refresco", variable=self.log_auto_refresh_var,
+                        command=self.toggle_logs_auto_refresh).grid(row=0, column=6, padx=6)
+        ttk.Button(top, text="Exportar txt", command=self.export_visible_logs).grid(
+            row=0, column=7, padx=(6, 0))
+        ttk.Button(top, text="Copiar visible", command=self.copy_visible_logs).grid(
+            row=0, column=8, padx=(6, 0))
 
         body = ttk.Frame(parent)
         body.grid(row=1, column=0, sticky="nsew")
@@ -2314,15 +2458,18 @@ class ShopifyUtilitiesApp:
         )
         self.logs_text.grid(row=0, column=0, sticky="nsew")
 
-        y_scroll = ttk.Scrollbar(body, orient="vertical", command=self.logs_text.yview)
+        y_scroll = ttk.Scrollbar(
+            body, orient="vertical", command=self.logs_text.yview)
         y_scroll.grid(row=0, column=1, sticky="ns")
         self.logs_text.configure(yscrollcommand=y_scroll.set)
 
-        x_scroll = ttk.Scrollbar(body, orient="horizontal", command=self.logs_text.xview)
+        x_scroll = ttk.Scrollbar(
+            body, orient="horizontal", command=self.logs_text.xview)
         x_scroll.grid(row=1, column=0, sticky="ew")
         self.logs_text.configure(xscrollcommand=x_scroll.set)
 
-        self.logs_text.insert("1.0", "Selecciona un contenedor y pulsa 'Ver logs'.")
+        self.logs_text.insert(
+            "1.0", "Selecciona un contenedor y pulsa 'Ver logs'.")
         self.logs_text.configure(state="disabled")
 
     def _run(self, args: list[str]) -> tuple[int, str, str]:
@@ -2401,7 +2548,8 @@ class ShopifyUtilitiesApp:
 
         try:
             if base_url:
-                client = docker.DockerClient(base_url=base_url, timeout=timeout_seconds)
+                client = docker.DockerClient(
+                    base_url=base_url, timeout=timeout_seconds)
             else:
                 client = docker.from_env(timeout=timeout_seconds)
             client.ping()
@@ -2416,7 +2564,8 @@ class ShopifyUtilitiesApp:
 
     def _ports_mapping_text(self, container: object) -> str:
         try:
-            ports = (container.attrs.get("NetworkSettings", {}) or {}).get("Ports", {}) or {}
+            ports = (container.attrs.get("NetworkSettings", {})
+                     or {}).get("Ports", {}) or {}
             parts: list[str] = []
             for cport, bindings in ports.items():
                 if not bindings:
@@ -2446,7 +2595,8 @@ class ShopifyUtilitiesApp:
         command = ""
         try:
             tags = getattr(container.image, "tags", []) or []
-            image = tags[0] if tags else (container.attrs.get("Config", {}) or {}).get("Image", "")
+            image = tags[0] if tags else (container.attrs.get(
+                "Config", {}) or {}).get("Image", "")
         except Exception:
             image = ""
 
@@ -2522,7 +2672,8 @@ class ShopifyUtilitiesApp:
         elif cmd in {"start", "stop", "restart", "rm", "network", "volume"}:
             op_timeout = 30
 
-        client = self._get_docker_sdk_client(host_override=host_override, timeout_seconds=op_timeout)
+        client = self._get_docker_sdk_client(
+            host_override=host_override, timeout_seconds=op_timeout)
         if client is None:
             return 1, "", "Docker SDK no disponible. Instala paquete Python 'docker'."
 
@@ -2543,7 +2694,8 @@ class ShopifyUtilitiesApp:
                 if quiet:
                     return 0, "\n".join(c.id for c in containers), ""
                 if fmt:
-                    lines = [self._render_ps_format_line(c, fmt) for c in containers]
+                    lines = [self._render_ps_format_line(
+                        c, fmt) for c in containers]
                     return 0, "\n".join(lines), ""
                 return 0, "\n".join(c.name for c in containers), ""
 
@@ -2589,9 +2741,11 @@ class ShopifyUtilitiesApp:
                     lines: list[str] = []
                     for net in client.networks.list():
                         name = net.name
-                        driver = (net.attrs.get("Driver", "") if getattr(net, "attrs", None) else "")
+                        driver = (net.attrs.get("Driver", "")
+                                  if getattr(net, "attrs", None) else "")
                         if fmt:
-                            line = fmt.replace("{{.Name}}", name).replace("{{.Driver}}", driver)
+                            line = fmt.replace("{{.Name}}", name).replace(
+                                "{{.Driver}}", driver)
                         else:
                             line = f"{name}|{driver}"
                         lines.append(line)
@@ -2603,7 +2757,8 @@ class ShopifyUtilitiesApp:
                         idx = sub_args.index("--driver")
                         if idx + 1 < len(sub_args):
                             driver = sub_args[idx + 1]
-                            rem = [x for i, x in enumerate(sub_args) if i not in {idx, idx + 1}]
+                            rem = [x for i, x in enumerate(sub_args) if i not in {
+                                                           idx, idx + 1}]
                             name = rem[-1] if rem else ""
                     else:
                         name = sub_args[-1] if sub_args else ""
@@ -2662,7 +2817,8 @@ class ShopifyUtilitiesApp:
                         idx = sub_args.index("--driver")
                         if idx + 1 < len(sub_args):
                             driver = sub_args[idx + 1]
-                            names = [x for i, x in enumerate(sub_args) if i not in {idx, idx + 1}]
+                            names = [x for i, x in enumerate(
+                                sub_args) if i not in {idx, idx + 1}]
                     out: list[str] = []
                     for name in names:
                         v = client.volumes.create(name=name, driver=driver)
@@ -2680,7 +2836,8 @@ class ShopifyUtilitiesApp:
                 if sub == "prune":
                     remove_all = "--all" in sub_args or "-a" in sub_args
                     if remove_all:
-                        pruned = client.api.prune_volumes(filters={"all": True})
+                        pruned = client.api.prune_volumes(
+                            filters={"all": True})
                     else:
                         pruned = client.volumes.prune()
                     return 0, json.dumps(pruned, ensure_ascii=False, indent=2), ""
@@ -2690,12 +2847,14 @@ class ShopifyUtilitiesApp:
                 if len(rest) >= 3 and rest[0] == "--format" and rest[1] == "{{.State.Running}}":
                     cont = client.containers.get(rest[2])
                     cont.reload()
-                    running = (cont.attrs.get("State", {}) or {}).get("Running", False)
+                    running = (cont.attrs.get("State", {})
+                               or {}).get("Running", False)
                     return 0, ("true" if running else "false"), ""
                 if len(rest) >= 3 and rest[0] == "--format" and rest[1] == "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}":
                     cont = client.containers.get(rest[2])
                     cont.reload()
-                    nets = ((cont.attrs.get("NetworkSettings", {}) or {}).get("Networks", {}) or {}).keys()
+                    nets = ((cont.attrs.get("NetworkSettings", {})
+                            or {}).get("Networks", {}) or {}).keys()
                     return 0, " ".join(str(n) for n in nets), ""
                 if len(rest) >= 3 and rest[0] == "--format" and rest[1] == "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}":
                     cont = client.containers.get(rest[2])
@@ -2714,19 +2873,22 @@ class ShopifyUtilitiesApp:
                 if not rest:
                     return 1, "", "docker port: falta contenedor"
                 cont = client.containers.get(rest[0])
-                ports = (cont.attrs.get("NetworkSettings", {}) or {}).get("Ports", {}) or {}
+                ports = (cont.attrs.get("NetworkSettings", {})
+                         or {}).get("Ports", {}) or {}
                 if len(rest) >= 2:
                     requested = rest[1]
                     key = requested if "/" in requested else f"{requested}/tcp"
                     binds = ports.get(key) or []
-                    lines = [f"{b.get('HostIp', '0.0.0.0')}:{b.get('HostPort', '')}" for b in binds]
+                    lines = [
+                        f"{b.get('HostIp', '0.0.0.0')}:{b.get('HostPort', '')}" for b in binds]
                     return 0, "\n".join(lines), ""
                 lines: list[str] = []
                 for cport, binds in ports.items():
                     if not binds:
                         continue
                     for b in binds:
-                        lines.append(f"{cport} -> {b.get('HostIp', '0.0.0.0')}:{b.get('HostPort', '')}")
+                        lines.append(
+                            f"{cport} -> {b.get('HostIp', '0.0.0.0')}:{b.get('HostPort', '')}")
                 return 0, "\n".join(lines), ""
 
             if cmd == "exec":
@@ -2738,13 +2900,14 @@ class ShopifyUtilitiesApp:
                 if idx >= len(rest):
                     return 1, "", "docker exec: falta contenedor"
                 cont_name = rest[idx]
-                exec_cmd = rest[idx + 1 :]
+                exec_cmd = rest[idx + 1:]
                 if not exec_cmd:
                     return 1, "", "docker exec: falta comando"
 
                 cont = client.containers.get(cont_name)
                 if exec_cmd == ["env"]:
-                    env_list = (cont.attrs.get("Config", {}) or {}).get("Env", []) or []
+                    env_list = (cont.attrs.get("Config", {})
+                                or {}).get("Env", []) or []
                     return 0, "\n".join(env_list), ""
 
                 cmd_value: object
@@ -2752,9 +2915,11 @@ class ShopifyUtilitiesApp:
                     cmd_value = exec_cmd[0]
                 else:
                     cmd_value = exec_cmd
-                result = cont.exec_run(cmd=cmd_value, user=user, stdout=True, stderr=True)
+                result = cont.exec_run(
+                    cmd=cmd_value, user=user, stdout=True, stderr=True)
                 exit_code = int(result.exit_code)
-                output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, (bytes, bytearray)) else str(result.output)
+                output = result.output.decode("utf-8", errors="replace") if isinstance(
+                    result.output, (bytes, bytearray)) else str(result.output)
                 if exit_code == 0:
                     return 0, output.strip(), ""
                 return exit_code, "", output.strip() or "Fallo en docker exec"
@@ -2857,7 +3022,7 @@ class ShopifyUtilitiesApp:
                 if i >= len(rest):
                     return 1, "", "docker run: falta imagen"
                 image = rest[i]
-                command = rest[i + 1 :] if (i + 1) < len(rest) else None
+                command = rest[i + 1:] if (i + 1) < len(rest) else None
                 if isinstance(command, list) and len(command) == 1:
                     command = command[0]
 
@@ -2910,7 +3075,8 @@ class ShopifyUtilitiesApp:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        initial_mode = self.docker_mode if self.docker_mode in {"local", "remote"} else "local"
+        initial_mode = self.docker_mode if self.docker_mode in {
+            "local", "remote"} else "local"
         current_host = self.docker_host
         if current_host.startswith("tcp://"):
             current_host = current_host[6:]
@@ -2926,7 +3092,8 @@ class ShopifyUtilitiesApp:
         elif self.discovered_lan_hosts:
             lan_default = self.discovered_lan_hosts[0]
         lan_var = tk.StringVar(value=lan_default)
-        manual_var = tk.StringVar(value=current_host if initial_mode == "remote" else "")
+        manual_var = tk.StringVar(
+            value=current_host if initial_mode == "remote" else "")
         result = {"accepted": False}
 
         body = ttk.Frame(dialog, padding=14)
@@ -2946,18 +3113,23 @@ class ShopifyUtilitiesApp:
 
         mode_box = ttk.Frame(body)
         mode_box.grid(row=2, column=0, sticky="w")
-        ttk.Radiobutton(mode_box, text="Modo local", value="local", variable=mode_var).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(mode_box, text="Modo remoto", value="remote", variable=mode_var).grid(row=0, column=1, sticky="w", padx=(16, 0))
+        ttk.Radiobutton(mode_box, text="Modo local", value="local",
+                        variable=mode_var).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(mode_box, text="Modo remoto", value="remote", variable=mode_var).grid(
+            row=0, column=1, sticky="w", padx=(16, 0))
 
         remote_frame = ttk.LabelFrame(body, text="Destino remoto", padding=10)
         remote_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         remote_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(remote_frame, text="Host LAN detectado:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
-        lan_combo = ttk.Combobox(remote_frame, textvariable=lan_var, state="readonly", values=self.discovered_lan_hosts)
+        ttk.Label(remote_frame, text="Host LAN detectado:").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
+        lan_combo = ttk.Combobox(remote_frame, textvariable=lan_var,
+                                 state="readonly", values=self.discovered_lan_hosts)
         lan_combo.grid(row=0, column=1, sticky="ew", pady=(0, 6))
 
-        ttk.Label(remote_frame, text="Dominio/IP manual:").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(remote_frame, text="Dominio/IP manual:").grid(row=1,
+                  column=0, sticky="w", padx=(0, 8))
         manual_entry = ttk.Entry(remote_frame, textvariable=manual_var)
         manual_entry.grid(row=1, column=1, sticky="ew")
 
@@ -3004,8 +3176,10 @@ class ShopifyUtilitiesApp:
         def cancel_mode() -> None:
             dialog.destroy()
 
-        ttk.Button(buttons, text="Cancelar", style="Ghost.TButton", command=cancel_mode).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(buttons, text="Continuar", style="Accent.TButton", command=accept_mode).grid(row=0, column=1)
+        ttk.Button(buttons, text="Cancelar", style="Ghost.TButton",
+                   command=cancel_mode).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="Continuar", style="Accent.TButton",
+                   command=accept_mode).grid(row=0, column=1)
 
         mode_var.trace_add("write", refresh_remote_controls)
         refresh_remote_controls()
@@ -3040,7 +3214,8 @@ class ShopifyUtilitiesApp:
 
         if self.docker_mode == "remote":
             detail = f"Modo remoto activo: {self.docker_host}"
-            self.log_event("DOCKER", "modo", "INFO", f"Cambio de modo a remoto ({self.docker_host})")
+            self.log_event("DOCKER", "modo", "INFO",
+                           f"Cambio de modo a remoto ({self.docker_host})")
         else:
             detail = "Modo local activo"
             self.log_event("DOCKER", "modo", "INFO", "Cambio de modo a local")
@@ -3127,7 +3302,8 @@ class ShopifyUtilitiesApp:
             candidates.append(os.path.join(meipass, relative_path))
 
         # Ejecutable instalado junto a archivos auxiliares
-        exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else ""
+        exe_dir = os.path.dirname(sys.executable) if getattr(
+            sys, "frozen", False) else ""
         if exe_dir:
             candidates.append(os.path.join(exe_dir, relative_path))
 
@@ -3174,7 +3350,7 @@ class ShopifyUtilitiesApp:
             # IPv6 con corchetes: [::1]:2375
             end = host.find("]")
             ip6 = host[1:end]
-            rest = host[end + 1 :]
+            rest = host[end + 1:]
             if rest.startswith(":") and rest[1:].isdigit():
                 return ip6, int(rest[1:])
             return ip6, 2375
@@ -3262,8 +3438,10 @@ class ShopifyUtilitiesApp:
                 details.append(diag)
         else:
             if not self._detect_docker_cli() and docker is None:
-                details.append("No se encontro docker.exe ni el paquete Python 'docker'.")
-                details.append("Instala Docker Desktop o recompila la app incluyendo dependencia 'docker'.")
+                details.append(
+                    "No se encontro docker.exe ni el paquete Python 'docker'.")
+                details.append(
+                    "Instala Docker Desktop o recompila la app incluyendo dependencia 'docker'.")
 
         if self.last_docker_error_detail:
             details.append(f"Error tecnico: {self.last_docker_error_detail}")
@@ -3278,23 +3456,29 @@ class ShopifyUtilitiesApp:
 
     @staticmethod
     def _build_audit_actor() -> str:
-        user = (os.environ.get("USERNAME") or os.environ.get("USER") or "desconocido").strip() or "desconocido"
-        host = (os.environ.get("COMPUTERNAME") or socket.gethostname() or "equipo-desconocido").strip() or "equipo-desconocido"
+        user = (os.environ.get("USERNAME") or os.environ.get(
+            "USER") or "desconocido").strip() or "desconocido"
+        host = (os.environ.get("COMPUTERNAME") or socket.gethostname()
+                or "equipo-desconocido").strip() or "equipo-desconocido"
         return f"{user}@{host}"
 
     def _ensure_remote_history_volume(self, client: object) -> None:
         try:
-            client.volumes.get(self.remote_history_volume)  # type: ignore[union-attr]
+            # type: ignore[union-attr]
+            client.volumes.get(self.remote_history_volume)
         except Exception:
-            client.volumes.create(name=self.remote_history_volume)  # type: ignore[union-attr]
+            # type: ignore[union-attr]
+            client.volumes.create(name=self.remote_history_volume)
 
     def _append_remote_history_line(self, line: str) -> None:
         if self.docker_mode != "remote":
-            raise RuntimeError("El historial requiere modo remoto activo para registrar auditoria compartida.")
+            raise RuntimeError(
+                "El historial requiere modo remoto activo para registrar auditoria compartida.")
 
         client = self._get_docker_sdk_client(timeout_seconds=20)
         if client is None:
-            raise RuntimeError("No se pudo conectar con Docker remoto para escribir historial.")
+            raise RuntimeError(
+                "No se pudo conectar con Docker remoto para escribir historial.")
 
         self._ensure_remote_history_volume(client)
         cmd = [
@@ -3306,18 +3490,22 @@ class ShopifyUtilitiesApp:
             "alpine",
             command=cmd,
             remove=True,
-            labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-write"},
+            labels={self._helper_label_key: self._helper_label_value,
+                "wpu.role": "history-write"},
             environment={"WPU_HISTORY_LINE": line},
-            volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
+            volumes={self.remote_history_volume: {
+                "bind": "/data", "mode": "rw"}},
         )
 
     def _read_remote_history_lines(self) -> list[str]:
         if self.docker_mode != "remote":
-            raise RuntimeError("Activa modo remoto para consultar historial compartido.")
+            raise RuntimeError(
+                "Activa modo remoto para consultar historial compartido.")
 
         client = self._get_docker_sdk_client(timeout_seconds=20)
         if client is None:
-            raise RuntimeError("No se pudo conectar con Docker remoto para leer historial.")
+            raise RuntimeError(
+                "No se pudo conectar con Docker remoto para leer historial.")
 
         self._ensure_remote_history_volume(client)
         cmd = [
@@ -3329,10 +3517,13 @@ class ShopifyUtilitiesApp:
             "alpine",
             command=cmd,
             remove=True,
-            labels={self._helper_label_key: self._helper_label_value, "wpu.role": "history-read"},
-            volumes={self.remote_history_volume: {"bind": "/data", "mode": "rw"}},
+            labels={self._helper_label_key: self._helper_label_value,
+                "wpu.role": "history-read"},
+            volumes={self.remote_history_volume: {
+                "bind": "/data", "mode": "rw"}},
         )
-        raw = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
+        raw = data.decode(
+            "utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
         return [line.rstrip("\n") for line in raw.splitlines()]
 
     def _on_history_tab_selected(self, _event: object = None) -> None:
@@ -3375,7 +3566,8 @@ class ShopifyUtilitiesApp:
 
                 labeled = client.containers.list(  # type: ignore[union-attr]
                     all=True,
-                    filters={"status": "exited", "label": f"{self._helper_label_key}={self._helper_label_value}"},
+                    filters={
+                        "status": "exited", "label": f"{self._helper_label_key}={self._helper_label_value}"},
                 )
                 for cont in labeled:
                     try:
@@ -3392,7 +3584,8 @@ class ShopifyUtilitiesApp:
                     try:
                         cfg = getattr(cont, "attrs", {}).get("Config", {})
                         cmd = cfg.get("Cmd")
-                        cmd_text = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd or "")
+                        cmd_text = " ".join(str(x) for x in cmd) if isinstance(
+                            cmd, list) else str(cmd or "")
                         cmd_low = cmd_text.lower()
                         if "/data" in cmd_low and (
                             "profiles" in cmd_low
@@ -3420,7 +3613,8 @@ class ShopifyUtilitiesApp:
         """Muestra el overlay spinner sobre el historial y lanza la animación."""
         if not hasattr(self, "_history_spinner_frame"):
             return
-        self._history_spinner_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._history_spinner_frame.place(
+            relx=0, rely=0, relwidth=1, relheight=1)
         self._history_spinner_frame.lift()
         self._history_spinner_index = 0
         self._animate_history_spinner()
@@ -3434,7 +3628,8 @@ class ShopifyUtilitiesApp:
         idx = self._history_spinner_index % len(pulses)
         self._history_spinner_dot_label.configure(text=pulses[idx])
         self._history_spinner_index += 1
-        self._history_spinner_job = self.root.after(220, self._animate_history_spinner)
+        self._history_spinner_job = self.root.after(
+            220, self._animate_history_spinner)
 
     def _hide_history_loading_spinner(self) -> None:
         """Oculta el overlay spinner del historial."""
@@ -3455,10 +3650,11 @@ class ShopifyUtilitiesApp:
                 with self._history_pending_lock:
                     pending = list(self._history_pending_lines)
                     self._history_pending_lines.clear()
-                
+
                 if pending:
                     try:
-                        os.makedirs(os.path.dirname(self.history_file) or ".", exist_ok=True)
+                        os.makedirs(os.path.dirname(
+                            self.history_file) or ".", exist_ok=True)
                         with open(self.history_file, "a", encoding="utf-8") as fh:
                             for line in pending:
                                 fh.write(line + "\n")
@@ -3476,24 +3672,27 @@ class ShopifyUtilitiesApp:
                 return
 
             # REMOTE MODE: use Docker volume with direct docker commands
-            
+
             # Flush pending lines JUST BEFORE writing to capture lines added during execution
             with self._history_pending_lock:
                 pending = list(self._history_pending_lines)
                 self._history_pending_lines.clear()
-            
+
             # Write pending lines first (with retry on failure)
             if pending:
                 batch = "".join(ln + "\n" for ln in pending)
                 try:
                     import subprocess
+
+
                     result = subprocess.run([
-                        "docker", "-H", self.docker_host,
-                        "run", "--rm",
-                        "-v", f"{self.remote_history_volume}:/data",
-                        "-e", f"WPU_BATCH={batch}",  # FIX: -e debe ir antes del nombre de la imagen
-                        "alpine", "sh", "-c", f"printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}",
-                    ], capture_output=True, text=True, timeout=30)
+                    "docker", "-H", self.docker_host,
+                    "run", "--rm",
+                    "-v", f"{self.remote_history_volume}:/data",
+                    "-e", f"WPU_BATCH={batch}",
+                     "alpine", "sh", "-c", f"printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}",
+                    ], capture_output=True, text=True, timeout=30,
+                     creationflags=subprocess.CREATE_NO_WINDOW)  # ← añadir esto
                     if result.returncode == 0:
                         pass
                     else:
@@ -3517,7 +3716,8 @@ class ShopifyUtilitiesApp:
                     "run", "--rm",
                     "-v", f"{self.remote_history_volume}:/data",
                     "alpine", "cat", f"{self.remote_history_path}"
-                ], capture_output=True, text=True, timeout=30)
+                ], capture_output=True, text=True, timeout=30,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
                 if result.returncode == 0:
                     data = result.stdout
                 else:
@@ -3586,12 +3786,12 @@ class ShopifyUtilitiesApp:
                 import subprocess
                 batch = line + "\n"
                 result = subprocess.run([
-                    "docker", "-H", self.docker_host,
-                    "run", "--rm",
-                    "-v", f"{self.remote_history_volume}:/data",
-                    "-e", f"WPU_BATCH={batch}",  # FIX: -e debe ir antes del nombre de la imagen
-                    "alpine", "sh", "-c", f"mkdir -p /data && printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}",
-                ], capture_output=True, text=True, timeout=30)
+                "docker", "-H", self.docker_host, "run", "--rm",
+                "-v", f"{self.remote_history_volume}:/data",
+                "-e", f"WPU_BATCH={batch}",
+                "alpine", "sh", "-c", f"mkdir -p /data && printf '%s' \"$WPU_BATCH\" >> {self.remote_history_path}",
+                ], capture_output=True, text=True, timeout=30,
+                   creationflags=subprocess.CREATE_NO_WINDOW)  # ← añadir
                 if result.returncode == 0:
                     print(f"[DEBUG] log_event: Directly wrote to Docker volume")
                 else:
@@ -7425,6 +7625,31 @@ class ShopifyUtilitiesApp:
             self.log_event("SCRIPT", bat_name, "ERROR", str(exc))
             messagebox.showerror("Ejecucion", f"No se pudo ejecutar {bat_name}.\n\n{exc}")
 
+    def open_docs(self) -> None:
+        docs = self._find_first_existing([
+            "guia_usuario.html",
+            "README.md",
+        ])
+        if not docs or not os.path.isfile(docs):
+            messagebox.showerror("Archivo", "No se encontro guia_usuario.html ni README.md")
+            return
+
+        try:
+            if sys.platform == "win32":
+                # os.startfile() llama directamente a la Shell API de Windows
+                # sin lanzar ningún proceso de terminal intermedio
+                os.startfile(os.path.abspath(docs))
+            else:
+                docs_uri = Path(docs).resolve().as_uri()
+                webbrowser.open_new_tab(docs_uri)
+            doc_name = os.path.basename(docs)
+            self.log_event("DOCS", doc_name, "INFO", f"Documentacion abierta: {doc_name}")
+            self.refresh_history()
+        except Exception as exc:  # pragma: no cover
+            doc_name = os.path.basename(docs) or "guia_usuario.html"
+            self.log_event("DOCS", doc_name, "ERROR", str(exc))
+            messagebox.showerror("Documento", f"No se pudo abrir la documentacion.\n\n{exc}")
+
     @staticmethod
     def _is_host_port_available(port: int) -> bool:
         if port < 1 or port > 65535:
@@ -7620,7 +7845,7 @@ class ShopifyUtilitiesApp:
         bind_shortcut("<Control-e>", self.open_export_wizard)
         bind_shortcut("<Control-l>", self.open_setup_wizard)
         bind_shortcut("<Control-b>", self._toggle_compact_layout)
-        bind_shortcut("<F1>", self.open_app_docs)
+        bind_shortcut("<F1>", self.open_docs)
         bind_shortcut("<Control-q>", self.on_close)
 
     def _schedule_layout_reflow(self, event: tk.Event) -> None:
@@ -13422,62 +13647,6 @@ code "$SCRIPT_DIR/{ws_basename}"
             os.startfile(ws_path)  # type: ignore[attr-defined]
         except Exception:
             pass
-
-    def open_docs(self) -> None:
-        docs = self._find_first_existing([
-            "docker-shopify-docs.html",
-            os.path.join("version_bat", "docker-shopify-docs.html"),
-            "README.md",
-        ])
-        if not os.path.isfile(docs):
-            messagebox.showerror("Archivo", "No se encontro docker-shopify-docs.html ni README.md")
-            return
-        try:
-            os.startfile(docs)  # type: ignore[attr-defined]
-            self.log_event("DOCS", os.path.basename(docs), "INFO", "Documentacion abierta")
-            self.refresh_history()
-        except Exception as exc:  # pragma: no cover
-            self.log_event("DOCS", os.path.basename(docs), "ERROR", str(exc))
-            messagebox.showerror("Documento", f"No se pudo abrir la documentacion.\n\n{exc}")
-
-    def open_app_docs(self) -> None:
-        docs = self._find_first_existing([
-            "guia_usuario.html",
-            "app-docs.html",
-            "README.md",
-        ])
-        if not os.path.isfile(docs):
-            # Fallback: intentar descargar la guia al directorio de la app.
-            try:
-                guide_path = os.path.join(self.app_dir, "guia_usuario.html")
-                req = urllib.request.Request(
-                    _DEFAULT_GUIDE_URL,
-                    headers={"User-Agent": f"ShopifyUtilidades-GuideOpen/{APP_VERSION}"},
-                )
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    content = resp.read()
-                if content and len(content) > 200:
-                    with open(guide_path, "wb") as fh:
-                        fh.write(content)
-                    docs = guide_path
-            except Exception:
-                pass
-
-        if not os.path.isfile(docs):
-            messagebox.showerror("Archivo", "No se encontro guia_usuario.html")
-            return
-        try:
-            import pathlib
-            import webbrowser
-
-            docs_uri = pathlib.Path(os.path.abspath(docs)).resolve().as_uri()
-            webbrowser.open_new_tab(docs_uri)
-            self.log_event("DOCS", os.path.basename(docs), "INFO", "Documentacion app abierta")
-            self.refresh_history()
-        except Exception as exc:  # pragma: no cover
-            self.log_event("DOCS", os.path.basename(docs), "ERROR", str(exc))
-            messagebox.showerror("Documento", f"No se pudo abrir la documentacion.\n\n{exc}")
-
 
 def main() -> None:
     if sys.platform != "win32":

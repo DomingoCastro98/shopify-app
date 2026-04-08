@@ -1,8 +1,8 @@
 {
-  "version": "1.1.7",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.7/Shopify_Utilidades.exe",
+  "version": "1.1.8",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.1.8/Shopify_Utilidades.exe",
   "download_url_py": "",
   "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Mejoras visuales y de experiencia de usuario: icono de cesta Shopify nativa en Windows (embebida en ejecutable), diálogo de actualización redimensionable con mejor gestión de notas largas, y correcciones en la apertura de guía (sin consola CMD). Actualizaciones previas de estabilidad incluyen: filtros de contenedores, selección/borrado de temas Shopify, protección de volumes remotos, y descarga automática de guía durante actualización."
+  "notes": "Se añadió acceso directo a la documentación desde la UI (botón lateral) y atajo global F1 para abrir guia_usuario.html. Se mejoró la apertura de la guía en Windows sin consola intermedia, y se ajustó estabilidad en el refresco de historial remoto/log_event. Incluye además ajustes visuales menores del panel de atajos y navegación."
 }
