@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.3"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.4"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -9994,13 +9994,15 @@ class ShopifyUtilitiesApp:
 
         def _store_candidates(raw_value: str) -> list[str]:
             candidates: list[str] = []
+            seen: set[str] = set()
 
             def _add(value: str) -> None:
                 item = (value or "").strip().strip("/")
                 if not item:
                     return
                 key = item.casefold()
-                if key not in {x.casefold() for x in candidates}:
+                if key not in seen:
+                    seen.add(key)
                     candidates.append(item)
 
             _add(raw_value)
@@ -10010,6 +10012,12 @@ class ShopifyUtilitiesApp:
             if host.lower().startswith("www."):
                 _add(host[4:])
             _add(host)
+
+            host_no_www = host[4:] if host.lower().startswith("www.") else host
+            if host_no_www and not host_no_www.lower().endswith(".myshopify.com"):
+                shop_slug = host_no_www.split(".", 1)[0].strip()
+                if shop_slug:
+                    _add(f"{shop_slug}.myshopify.com")
             return candidates
 
         def _run_theme_list(command: str) -> tuple[int, str]:
@@ -10042,9 +10050,83 @@ class ShopifyUtilitiesApp:
             except Exception:
                 return 1, ""
 
+        def _extract_store_candidates_from_auth_status(output: str) -> list[str]:
+            discovered: list[str] = []
+            seen: set[str] = set()
+
+            def _add(value: str) -> None:
+                item = (value or "").strip().strip("/")
+                if not item:
+                    return
+                if "://" in item:
+                    parsed_val = urllib.parse.urlparse(item)
+                    item = (parsed_val.netloc or parsed_val.path or "").strip().strip("/")
+                if not item:
+                    return
+                key = item.casefold()
+                if key in seen:
+                    return
+                seen.add(key)
+                discovered.append(item)
+
+            payload = output.strip()
+            if not payload:
+                return discovered
+
+            if not (payload.startswith("{") or payload.startswith("[")):
+                json_match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", payload)
+                if json_match:
+                    payload = json_match.group(1).strip()
+
+            try:
+                data = json.loads(payload)
+                scan: list[object] = []
+                if isinstance(data, dict):
+                    scan.append(data)
+                    for key in ("stores", "shop", "currentStore", "store"):
+                        value = data.get(key)
+                        if value is not None:
+                            scan.append(value)
+                elif isinstance(data, list):
+                    scan.extend(data)
+
+                for item in scan:
+                    if isinstance(item, dict):
+                        for key in (
+                            "shopDomain",
+                            "shop_domain",
+                            "myshopifyDomain",
+                            "myshopify_domain",
+                            "storeDomain",
+                            "store_domain",
+                            "domain",
+                            "hostname",
+                            "host",
+                            "url",
+                            "shop",
+                            "store",
+                        ):
+                            value = item.get(key)
+                            if isinstance(value, str):
+                                _add(value)
+                    elif isinstance(item, str):
+                        _add(item)
+            except Exception:
+                pass
+
+            for line in output.splitlines():
+                line_clean = line.strip()
+                if not line_clean:
+                    continue
+                for token in re.findall(r"[a-z0-9][a-z0-9-]*\.myshopify\.com", line_clean, flags=re.IGNORECASE):
+                    _add(token)
+
+            return discovered
+
         raw_output = ""
         code = 1
-        for store_candidate in _store_candidates(raw_store):
+        store_candidates = _store_candidates(raw_store)
+        for store_candidate in store_candidates:
             cmd_with_store = (
                 f"shopify theme list --store \"{store_candidate}\" --json < /dev/null"
                 f" || shopify theme list --store \"{store_candidate}\" < /dev/null"
@@ -10052,6 +10134,19 @@ class ShopifyUtilitiesApp:
             code, raw_output = _run_theme_list(cmd_with_store)
             if raw_output:
                 break
+
+        if not raw_output:
+            _auth_code, auth_output = _run_theme_list("shopify auth status --json < /dev/null || shopify auth status < /dev/null")
+            for auth_store in _extract_store_candidates_from_auth_status(auth_output):
+                if auth_store.casefold() in {x.casefold() for x in store_candidates}:
+                    continue
+                cmd_with_store = (
+                    f"shopify theme list --store \"{auth_store}\" --json < /dev/null"
+                    f" || shopify theme list --store \"{auth_store}\" < /dev/null"
+                )
+                code, raw_output = _run_theme_list(cmd_with_store)
+                if raw_output:
+                    break
 
         if not raw_output:
             code, raw_output = _run_theme_list("shopify theme list --json < /dev/null || shopify theme list < /dev/null")
@@ -10121,6 +10216,16 @@ class ShopifyUtilitiesApp:
             if line.lower().startswith("id ") or line.lower().startswith("theme "):
                 continue
 
+            hash_match = re.search(r"#\s*(\d{6,})", line)
+            if hash_match:
+                theme_id = hash_match.group(1)
+                theme_name = line[:hash_match.start()].strip()
+                theme_name = re.sub(r"^[\-\*\u2022\s]+", "", theme_name)
+                theme_name = re.sub(r"\[[^\]]+\]", "", theme_name).strip(" -|:")
+                if theme_id and theme_name:
+                    parsed.append((theme_id, theme_name))
+                    continue
+
             if "│" in line:
                 parts = [piece.strip() for piece in line.split("│") if piece.strip()]
             elif "|" in line:
@@ -10137,10 +10242,13 @@ class ShopifyUtilitiesApp:
                 if re.fullmatch(r"\d+", part):
                     theme_id = part
                     if idx + 1 < len(parts):
-                        theme_name = parts[idx + 1]
+                        theme_name = " ".join(parts[idx + 1:]).strip()
+                    elif idx > 0:
+                        theme_name = " ".join(parts[:idx]).strip()
                     break
 
             if theme_id and theme_name:
+                theme_name = re.sub(r"\[[^\]]+\]", "", theme_name).strip(" -|:")
                 parsed.append((theme_id, theme_name))
 
         return _dedupe(parsed)

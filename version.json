@@ -1,8 +1,8 @@
 {
-  "version": "1.2.3",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.2.3/Shopify_Utilidades.exe",
+  "version": "1.2.4",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.2.4/Shopify_Utilidades.exe",
   "download_url_py": "",
   "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Fix SDK al crear contenedor y mejora en listado de temas remotos con URL personalizada (https://...)."
+  "notes": "Mejoras en deteccion de temas remotos: soporte robusto para URL personalizada, fallback con tienda autenticada y parseo extendido del output Shopify CLI."
 }
