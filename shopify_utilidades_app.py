@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.2"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.3"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -9988,43 +9988,74 @@ class ShopifyUtilitiesApp:
         if not self._is_container_running(shopify_container):
             return []
 
-        safe_store = store_url.replace('"', '').replace("'", "").strip()
-        if not safe_store:
+        raw_store = store_url.replace('"', '').replace("'", "").strip()
+        if not raw_store:
             return []
 
-        cmd = (
-            f"shopify theme list --store \"{safe_store}\" --json < /dev/null"
-            f" || shopify theme list --store \"{safe_store}\" < /dev/null"
-        )
-        docker_args = self._build_docker_command(["docker", "exec", shopify_container, "sh", "-c", cmd])
-        if docker_args and docker_args[0].lower() == "docker":
+        def _store_candidates(raw_value: str) -> list[str]:
+            candidates: list[str] = []
+
+            def _add(value: str) -> None:
+                item = (value or "").strip().strip("/")
+                if not item:
+                    return
+                key = item.casefold()
+                if key not in {x.casefold() for x in candidates}:
+                    candidates.append(item)
+
+            _add(raw_value)
+            parsed = urllib.parse.urlparse(raw_value if "://" in raw_value else f"https://{raw_value}")
+            host = (parsed.netloc or parsed.path or "").strip()
+            host = host.split("/", 1)[0].strip().rstrip("/")
+            if host.lower().startswith("www."):
+                _add(host[4:])
+            _add(host)
+            return candidates
+
+        def _run_theme_list(command: str) -> tuple[int, str]:
+            docker_args = self._build_docker_command(["docker", "exec", shopify_container, "sh", "-c", command])
+            if docker_args and docker_args[0].lower() == "docker":
+                try:
+                    docker_args[0] = self._resolver_comando("docker")
+                except Exception:
+                    pass
+
             try:
-                docker_args[0] = self._resolver_comando("docker")
+                process = subprocess.run(
+                    docker_args,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=self.tools_dir,
+                    shell=False,
+                    env=self._docker_process_env(),
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=25,
+                )
+                code = process.returncode
+                out = (process.stdout or "").strip()
+                err = (process.stderr or "").strip()
+                return code, "\n".join([out or "", err or ""]).strip()
+            except subprocess.TimeoutExpired:
+                return 124, ""
             except Exception:
-                pass
+                return 1, ""
 
-        try:
-            process = subprocess.run(
-                docker_args,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=self.tools_dir,
-                shell=False,
-                env=self._docker_process_env(),
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=25,
+        raw_output = ""
+        code = 1
+        for store_candidate in _store_candidates(raw_store):
+            cmd_with_store = (
+                f"shopify theme list --store \"{store_candidate}\" --json < /dev/null"
+                f" || shopify theme list --store \"{store_candidate}\" < /dev/null"
             )
-            code = process.returncode
-            out = (process.stdout or "").strip()
-            err = (process.stderr or "").strip()
-        except subprocess.TimeoutExpired:
-            return []
-        except Exception:
-            return []
+            code, raw_output = _run_theme_list(cmd_with_store)
+            if raw_output:
+                break
 
-        raw_output = "\n".join([out or "", err or ""]).strip()
+        if not raw_output:
+            code, raw_output = _run_theme_list("shopify theme list --json < /dev/null || shopify theme list < /dev/null")
+
         if code != 0 and not raw_output:
             return []
 
