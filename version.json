@@ -1,8 +1,8 @@
 {
-  "version": "1.2.10",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.2.10/Shopify_Utilidades.exe",
+  "version": "1.2.11",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.2.11/Shopify_Utilidades.exe",
   "download_url_py": "",
   "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Ajuste final del flujo de temas remotos: challenge de login tomado desde theme list, store normalizado sin https y diagnostico CMD con log."
+  "notes": "Importacion de temas reforzada: limpieza de templates/locales duplicados y doble reinicio del contenedor con 10s antes del segundo para estabilizar el deploy."
 }

@@ -38,3 +38,4 @@ py_compile_output.txt
 *.zip
 docker_bin/docker/
 git_list*.txt
+build_release.bat

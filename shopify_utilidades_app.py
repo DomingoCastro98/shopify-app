@@ -2479,6 +2479,7 @@ class ShopifyUtilitiesApp:
         final_args = self._build_docker_command(args)
         process = subprocess.run(
             final_args,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2637,6 +2638,7 @@ class ShopifyUtilitiesApp:
         ])
         process = subprocess.run(
             helper_args,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             cwd=self.tools_dir,
@@ -3318,6 +3320,195 @@ class ShopifyUtilitiesApp:
 
         name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name).strip("-._")
         return name or fallback
+
+    def _clear_theme_directory(self, container: str, theme_dir: str) -> None:
+        target = (theme_dir or "").strip()
+        if not target:
+            return
+
+        quoted_target = shlex.quote(target)
+        cleanup_cmd = (
+            f"mkdir -p {quoted_target} && "
+            f"find {quoted_target} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} \\;"
+        )
+        code, _, err = self._run(["docker", "exec", "-u", "root", container, "sh", "-c", cleanup_cmd])
+        if code != 0:
+            raise RuntimeError(err or f"No se pudo limpiar el directorio {target} antes de descargar el tema.")
+
+    def _normalize_theme_locales(self, container: str, theme_dir: str) -> None:
+        target = (theme_dir or "").strip()
+        if not target:
+            return
+
+        locales_dir = f"{target}/locales"
+        quoted_locales_dir = shlex.quote(locales_dir)
+        node_script = r"""
+const fs = require('fs');
+const path = require('path');
+
+const dir = process.argv[1];
+if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    process.exit(0);
+}
+
+const files = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+if (files.length === 0) {
+    process.exit(0);
+}
+
+const items = files.map((name) => {
+    const base = name.slice(0, -5);
+    const isDefault = base.endsWith('.default');
+    const locale = isDefault ? base.slice(0, -8) : base;
+    return { name, locale, isDefault };
+});
+
+const preferredDefault =
+    items.find((item) => item.name === 'en.default.json') ||
+    items.filter((item) => item.isDefault).sort((a, b) => a.name.localeCompare(b.name))[0] ||
+    null;
+
+const defaultLocale = preferredDefault ? preferredDefault.locale : null;
+const grouped = new Map();
+for (const item of items) {
+    const list = grouped.get(item.locale) || [];
+    list.push(item);
+    grouped.set(item.locale, list);
+}
+
+const toRemove = new Set();
+
+for (const [locale, group] of grouped.entries()) {
+    const defaultItems = group.filter((item) => item.isDefault);
+    const plainItems = group.filter((item) => !item.isDefault);
+
+    if (defaultLocale && locale === defaultLocale) {
+        for (const item of plainItems) {
+            toRemove.add(item.name);
+        }
+        for (const item of defaultItems) {
+            if (!preferredDefault || item.name !== preferredDefault.name) {
+                toRemove.add(item.name);
+            }
+        }
+        continue;
+    }
+
+    if (defaultItems.length > 0) {
+        if (plainItems.length > 0) {
+            for (const item of defaultItems) {
+                toRemove.add(item.name);
+            }
+            for (const item of plainItems.slice(1)) {
+                toRemove.add(item.name);
+            }
+            continue;
+        }
+
+        const keeper = defaultItems.sort((a, b) => a.name.localeCompare(b.name))[0];
+        const targetName = `${locale}.json`;
+        if (keeper && keeper.name !== targetName) {
+            const sourcePath = path.join(dir, keeper.name);
+            const targetPath = path.join(dir, targetName);
+            try {
+                if (fs.existsSync(targetPath)) {
+                    fs.rmSync(targetPath, { force: true });
+                }
+                fs.renameSync(sourcePath, targetPath);
+            } catch (error) {
+                try {
+                    fs.rmSync(sourcePath, { force: true });
+                } catch (_error) {
+                }
+            }
+        }
+        for (const item of defaultItems) {
+            if (item.name !== (keeper && keeper.name)) {
+                toRemove.add(item.name);
+            }
+        }
+        continue;
+    }
+
+    for (const item of plainItems.slice(1)) {
+        toRemove.add(item.name);
+    }
+}
+
+for (const name of toRemove) {
+    try {
+        fs.rmSync(path.join(dir, name), { force: true });
+    } catch (_error) {
+    }
+}
+"""
+        code, _, err = self._run([
+            "docker",
+            "exec",
+            "-u",
+            "root",
+            container,
+            "sh",
+            "-c",
+            f"node -e {shlex.quote(node_script)} {quoted_locales_dir}",
+        ])
+        if code != 0:
+            raise RuntimeError(err or f"No se pudieron normalizar los locales en {locales_dir}.")
+
+    def _normalize_theme_templates(self, container: str, theme_dir: str) -> None:
+        target = (theme_dir or "").strip()
+        if not target:
+            return
+
+        templates_dir = f"{target}/templates"
+        quoted_templates_dir = shlex.quote(templates_dir)
+        node_script = r"""
+const fs = require('fs');
+const path = require('path');
+
+const dir = process.argv[1];
+if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    process.exit(0);
+}
+
+function walk(currentDir) {
+    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+        const entryPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+            walk(entryPath);
+            continue;
+        }
+
+        if (!entry.isFile() || !entry.name.endsWith('.json')) {
+            continue;
+        }
+
+        const liquidName = entry.name.slice(0, -5) + '.liquid';
+        const liquidPath = path.join(currentDir, liquidName);
+        if (fs.existsSync(liquidPath)) {
+            try {
+                fs.rmSync(liquidPath, { force: true });
+            } catch (_error) {
+            }
+        }
+    }
+}
+
+walk(dir);
+"""
+
+        code, _, err = self._run([
+            "docker",
+            "exec",
+            "-u",
+            "root",
+            container,
+            "sh",
+            "-c",
+            f"node -e {shlex.quote(node_script)} {quoted_templates_dir}",
+        ])
+        if code != 0:
+            raise RuntimeError(err or f"No se pudieron normalizar las plantillas en {templates_dir}.")
 
     def _is_tcp_open(self, host: str, port: int, timeout: float = 0.8) -> bool:
         try:
@@ -4038,6 +4229,173 @@ class ShopifyUtilitiesApp:
             self.root.after_cancel(self.spinner_job_id)
             self.spinner_job_id = None
         self.status_var.set("Listo")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    #  VENTANA DE LOG EN VIVO – Listar temas remotos
+    # ──────────────────────────────────────────────────────────────────────────
+    def _show_remote_theme_live_log(self) -> "dict":
+        """
+        Abre una ventana tipo consola que muestra en tiempo real lo que ocurre
+        durante el proceso de listar temas remotos.
+
+        Devuelve un dict-controlador con:
+          log(msg)   → añade una línea con timestamp al área de texto
+          close()    → marca el proceso como terminado y habilita el botón Cerrar
+          destroy()  → cierra la ventana inmediatamente (por si la app se cierra)
+        """
+        WIN_W, WIN_H = 680, 400
+
+        win = tk.Toplevel(self.root)
+        win.title("Listando temas remotos — Log en vivo")
+        win.geometry(f"{WIN_W}x{WIN_H}")
+        win.resizable(True, True)
+        win.minsize(480, 260)
+        win.configure(bg="#0d1117")
+
+        # Centrar sobre la ventana principal
+        try:
+            self.root.update_idletasks()
+            rx = self.root.winfo_x() + (self.root.winfo_width()  - WIN_W) // 2
+            ry = self.root.winfo_y() + (self.root.winfo_height() - WIN_H) // 2
+            win.geometry(f"{WIN_W}x{WIN_H}+{rx}+{ry}")
+        except Exception:
+            pass
+
+        # Barra de título verde shopify
+        title_bar = tk.Frame(win, bg="#008060", height=36)
+        title_bar.pack(fill="x", side="top")
+        title_bar.pack_propagate(False)
+        tk.Label(
+            title_bar,
+            text="⬛  Listando temas remotos — Log en vivo",
+            font=("Segoe UI Semibold", 10),
+            bg="#008060",
+            fg="#ffffff",
+            padx=12,
+        ).pack(side="left", fill="y")
+
+        # Status badge (esquina derecha de la barra)
+        status_badge = tk.Label(
+            title_bar,
+            text=" ● EN PROCESO ",
+            font=("Segoe UI", 8, "bold"),
+            bg="#f59e0b",
+            fg="#1a1a1a",
+            padx=6,
+            pady=2,
+        )
+        status_badge.pack(side="right", padx=10, pady=6)
+
+        # Área de texto consola
+        text_frame = tk.Frame(win, bg="#0d1117")
+        text_frame.pack(fill="both", expand=True, padx=0, pady=0)
+
+        scrollbar = tk.Scrollbar(text_frame, bg="#161b22", troughcolor="#0d1117",
+                                  activebackground="#21262d", width=12)
+        scrollbar.pack(side="right", fill="y")
+
+        txt = tk.Text(
+            text_frame,
+            bg="#0d1117",
+            fg="#c9d1d9",
+            font=("Consolas", 9),
+            insertbackground="#c9d1d9",
+            selectbackground="#264f78",
+            relief="flat",
+            borderwidth=0,
+            state="disabled",
+            wrap="word",
+            yscrollcommand=scrollbar.set,
+            padx=10,
+            pady=8,
+        )
+        txt.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=txt.yview)
+
+        # Colores de línea por tipo
+        txt.tag_config("ts",   foreground="#6e7681")            # timestamp
+        txt.tag_config("ok",   foreground="#3fb950")            # éxito ✔
+        txt.tag_config("warn", foreground="#d29922")            # advertencia
+        txt.tag_config("err",  foreground="#f85149")            # error ✘
+        txt.tag_config("info", foreground="#58a6ff")            # info →
+        txt.tag_config("auth", foreground="#e3b341", font=("Consolas", 9, "bold"))  # auth 🔑
+        txt.tag_config("cmd",  foreground="#8b949e", font=("Consolas", 8))          # comando
+
+        # Pie con botón Cerrar
+        footer = tk.Frame(win, bg="#161b22", height=44)
+        footer.pack(fill="x", side="bottom")
+        footer.pack_propagate(False)
+
+        close_btn = ttk.Button(
+            footer,
+            text="Cerrar",
+            state="disabled",
+            command=win.destroy,
+        )
+        close_btn.pack(side="right", padx=14, pady=8)
+
+        hint_lbl = tk.Label(
+            footer,
+            text="El botón Cerrar se habilitará cuando el proceso termine.",
+            font=("Segoe UI", 8),
+            bg="#161b22",
+            fg="#6e7681",
+        )
+        hint_lbl.pack(side="left", padx=14)
+
+        # Línea separadora
+        tk.Frame(win, bg="#21262d", height=1).pack(fill="x", side="bottom")
+
+        # Impedir cierre con X mientras procesa (igual que el modal)
+        _done = [False]
+        def _on_close():
+            if _done[0]:
+                win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        def _log(msg: str, kind: str = "info") -> None:
+            """Añade una línea al área de texto desde cualquier hilo."""
+            def _append():
+                if not win.winfo_exists():
+                    return
+                ts = datetime.now().strftime("%H:%M:%S")
+                txt.configure(state="normal")
+                txt.insert("end", f"[{ts}] ", "ts")
+                txt.insert("end", f"{msg}\n", kind)
+                txt.configure(state="disabled")
+                txt.see("end")
+            if threading.current_thread() is threading.main_thread():
+                _append()
+            else:
+                win.after(0, _append)
+
+        def _close(success: bool = True) -> None:
+            """Marca el proceso como terminado, actualiza badge y habilita Cerrar."""
+            _done[0] = True
+            def _ui():
+                if not win.winfo_exists():
+                    return
+                if success:
+                    status_badge.config(text=" ✔ COMPLETADO ", bg="#3fb950", fg="#0d1117")
+                    hint_lbl.config(text="Proceso completado.")
+                else:
+                    status_badge.config(text=" ✘ ERROR ", bg="#f85149", fg="#ffffff")
+                    hint_lbl.config(text="El proceso finalizó con errores.")
+                close_btn.config(state="normal")
+                win.protocol("WM_DELETE_WINDOW", win.destroy)
+            win.after(0, _ui)
+
+        def _destroy() -> None:
+            try:
+                if win.winfo_exists():
+                    win.destroy()
+            except Exception:
+                pass
+
+        # Mensaje inicial
+        _log("Iniciando proceso de listado de temas remotos...", "info")
+
+        return {"log": _log, "close": _close, "destroy": _destroy}
 
     def _show_loading_modal(self, message: str) -> tk.Toplevel:
         """
@@ -8771,7 +9129,8 @@ class ShopifyUtilitiesApp:
                 # Lanzar auth en background y capturar su output via docker logs
                 auth_cmd = (
                     "unset SHOPIFY_CLI_THEME_TOKEN SHOPIFY_ACCESS_TOKEN SHOPIFY_FLAG_STORE SHOPIFY_THEME_NAME; "  # Mantener unset por limpieza, pero nunca se setean
-                    "shopify auth login > /tmp/shopify_auth.log 2>&1 &"
+                    "rm -f /tmp/shopify_auth.log; "
+                    "nohup setsid shopify auth login < /dev/null > /tmp/shopify_auth.log 2>&1 &"
                 )
                 self._run(["docker", "exec", shopify_container, "sh", "-c", auth_cmd])
 
@@ -8846,6 +9205,9 @@ class ShopifyUtilitiesApp:
 
                         # Marcar auth como completada para que el entrypoint lo sepa
                         self._run(["docker", "exec", shopify_container, "sh", "-c", "touch /tmp/shopify_auth_ok"])
+
+                        # Limpiar el directorio destino para evitar restos de temas anteriores.
+                        self._clear_theme_directory(shopify_container, theme_dir)
 
                         # Ahora hacer shopify theme pull usando el nombre de tema especificado
                         _theme_flag = f"--theme \"{theme_name}\"" if theme_name else ""
@@ -9096,28 +9458,120 @@ class ShopifyUtilitiesApp:
 
         return auth_code, auth_url
 
-    def _start_shopify_auth_and_get_challenge(self, shopify_container: str, wait_seconds: int = 25) -> tuple[str, str] | None:
-        """Inicia shopify auth login en background y extrae (codigo, url) desde /tmp/shopify_auth.log."""
+    def _start_shopify_auth_and_get_challenge(self, shopify_container: str, wait_seconds: int = 90, store_url: str = "", log_callback=None) -> tuple[str, str] | None:
+        """Inicia shopify auth login en background y extrae (codigo, url) desde /tmp/shopify_auth.log o docker logs.
+        Reintentas múltiples veces si el proceso no genera el challenge a tiempo.
+        log_callback: función opcional para logging. Recibe (msg, kind) donde kind es "info", "warn", "ok", "err"
+        """
         container = (shopify_container or "").strip()
         if not container:
             return None
 
-        launch_cmd = (
-            "rm -f /tmp/shopify_auth.log; "
-            "shopify auth login > /tmp/shopify_auth.log 2>&1 &"
-        )
-        self._run(["docker", "exec", container, "sh", "-c", launch_cmd])
+        def _log(msg: str, kind: str = "info") -> None:
+            if log_callback:
+                log_callback(msg, kind)
 
-        for _ in range(max(3, wait_seconds)):
-            time.sleep(1.0)
-            code, out, err = self._run([
-                "docker", "exec", container, "sh", "-c", "cat /tmp/shopify_auth.log 2>/dev/null || true"
-            ])
-            if code != 0 and not (out or "").strip() and not (err or "").strip():
+        # Esta versión de Shopify CLI no soporta `auth login --store`.
+        # Forzamos logout para limpiar sesión dañada y luego relogin.
+        launch_candidates = [
+            # Preferido cuando setsid esta disponible.
+            "nohup setsid sh -c 'shopify auth logout >/dev/null 2>&1 || true; shopify auth login' < /dev/null > /tmp/shopify_auth.log 2>&1 &",
+            # Fallback comun para imagenes sin setsid.
+            "nohup sh -c 'shopify auth logout >/dev/null 2>&1 || true; shopify auth login' < /dev/null > /tmp/shopify_auth.log 2>&1 &",
+            # Ultimo recurso: escribir en tee (salida a stdout y archivo simultáneamente).
+            "sh -c 'shopify auth logout >/dev/null 2>&1 || true; shopify auth login 2>&1 | tee /tmp/shopify_auth.log' &",
+            # Último intento: solo redireccionar stdout sin background explícito
+            "sh -c 'shopify auth logout >/dev/null 2>&1 || true; shopify auth login > /tmp/shopify_auth.log 2>&1 &'",
+        ]
+
+        # Reintentar hasta 3 veces si no se obtiene challenge
+        for attempt in range(1, 4):
+            if attempt > 1:
+                _log(f"Intento {attempt}/3 de obtención del desafío...", "info")
+                time.sleep(2.0)
+            
+            launched_ok = False
+            for candidate_idx, candidate in enumerate(launch_candidates):
+                self._run(["docker", "exec", container, "sh", "-c", f"rm -f /tmp/shopify_auth.log; {candidate}"])
+                # Dar una pequeña ventana para que el proceso escriba en el log.
+                time.sleep(1.5)
+                _, out_probe, err_probe = self._run([
+                    "docker", "exec", container, "sh", "-c", "cat /tmp/shopify_auth.log 2>/dev/null || true"
+                ])
+                launch_probe = "\n".join([out_probe or "", err_probe or ""]).strip()
+                if launch_probe:
+                    launched_ok = True
+                    _log(f"Proceso shopify auth login iniciado correctamente (candidato {candidate_idx + 1}).", "ok")
+                    break
+
+            if not launched_ok:
+                _log(f"No se pudo lanzar shopify auth login en intento {attempt}.", "warn")
                 continue
-            challenge = self._extract_shopify_auth_challenge("\n".join([out or "", err or ""]))
-            if challenge:
-                return challenge
+
+            # Esperar el challenge con timeout largo, intentando ambos: archivo y docker logs
+            deadline = time.time() + max(60, wait_seconds)
+            elapsed_logged = 0
+            last_log_content = ""
+            non_interactive_error_detected = False
+            
+            while time.time() < deadline:
+                remaining = int(deadline - time.time())
+                
+                # Mostrar progreso cada 15 segundos
+                if remaining > 0 and remaining % 15 == max(0, wait_seconds - 10) % 15:
+                    if remaining != elapsed_logged:
+                        _log(f"Esperando código de verificación... ({remaining}s restantes)", "info")
+                        elapsed_logged = remaining
+                
+                time.sleep(1.0)
+                
+                # Opción 1: Leer del archivo de log
+                code, out, err = self._run([
+                    "docker", "exec", container, "sh", "-c", "cat /tmp/shopify_auth.log 2>/dev/null || true"
+                ])
+                log_content = "\n".join([out or "", err or ""])
+                
+                # Opción 2: Si el archivo está vacío, intentar docker logs como fallback
+                if not log_content.strip():
+                    _, docker_log_out, _ = self._run([
+                        "docker", "logs", "--tail", "100", container
+                    ])
+                    if docker_log_out:
+                        log_content = docker_log_out
+                
+                if log_content.strip():
+                    last_log_content = log_content  # Guardar para fallback
+                    
+                    # Detectar error de ambiente no-interactivo y fallar rápido
+                    if any(err_marker in log_content.lower() for err_marker in [
+                        "interactive environment",
+                        "run the command in",
+                        "specify the option in the command"
+                    ]):
+                        non_interactive_error_detected = True
+                        _log("⚠ Docker no-interactivo detectado: shopify auth login requiere terminal interactiva.", "warn")
+                        break
+                    
+                    challenge = self._extract_shopify_auth_challenge(log_content)
+                    if challenge:
+                        _log(f"✔ Código de verificación obtenido correctamente.", "ok")
+                        return challenge
+
+            # Si se detectó error de interactividad, salir rápido sin reintentar
+            if non_interactive_error_detected:
+                _log("Docker requiere modo interactivo (-it). Usando flujo manual de autenticación...", "info")
+                return None
+
+            # Si llegamos aquí, timeout: mostrar qué encontramos para debugging
+            if last_log_content.strip():
+                # Mostrar las últimas 5 líneas para debugging
+                last_lines = last_log_content.strip().splitlines()[-5:]
+                _log("Timeout esperando challenge. Últimas líneas del log:", "warn")
+                for line in last_lines:
+                    if line.strip():
+                        _log(f"  → {line.strip()}", "cmd")
+            
+            _log(f"No se obtuvo código en el intento {attempt} (timeout).", "warn")
 
         return None
 
@@ -9335,6 +9789,9 @@ class ShopifyUtilitiesApp:
             
             # Marcar auth como completada
             self._run(["docker", "exec", shopify_container, "sh", "-c", "touch /tmp/shopify_auth_ok"])
+
+            # Limpiar el directorio destino para evitar restos de temas anteriores.
+            self._clear_theme_directory(shopify_container, theme_dir)
             
             # Descargar el tema
             theme_name_for_cli = (theme_name or "").strip() or "Horizon"
@@ -10029,7 +10486,8 @@ class ShopifyUtilitiesApp:
             return candidates
 
         def _run_theme_list(command: str) -> tuple[int, str]:
-            docker_args = self._build_docker_command(["docker", "exec", shopify_container, "sh", "-c", command])
+            wrapped_cmd = f"timeout 20s sh -c {shlex.quote(command)}"
+            docker_args = self._build_docker_command(["docker", "exec", shopify_container, "sh", "-c", wrapped_cmd])
             if docker_args and docker_args[0].lower() == "docker":
                 try:
                     docker_args[0] = self._resolver_comando("docker")
@@ -10039,6 +10497,7 @@ class ShopifyUtilitiesApp:
             try:
                 process = subprocess.run(
                     docker_args,
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -10059,6 +10518,7 @@ class ShopifyUtilitiesApp:
                 return 1, ""
 
         raw_output = ""
+        challenge_output = ""
         code = 1
         store_candidates = _store_candidates(raw_store)
         for store_candidate in store_candidates:
@@ -10067,16 +10527,24 @@ class ShopifyUtilitiesApp:
                 f" || shopify theme list --store \"{store_candidate}\" < /dev/null"
             )
             code, raw_output = _run_theme_list(cmd_with_store)
-            if raw_output and not self._extract_shopify_auth_challenge(raw_output):
+            challenge = self._extract_shopify_auth_challenge(raw_output) if raw_output else None
+            if challenge:
+                if not challenge_output:
+                    challenge_output = raw_output
+                raw_output = ""
+                continue
+            if raw_output:
                 break
-            raw_output = ""
 
         if not raw_output:
             code, raw_output = _run_theme_list("shopify theme list --json < /dev/null || shopify theme list < /dev/null")
-            if raw_output and self._extract_shopify_auth_challenge(raw_output):
+            challenge = self._extract_shopify_auth_challenge(raw_output) if raw_output else None
+            if challenge:
+                if not challenge_output:
+                    challenge_output = raw_output
                 raw_output = ""
 
-        self._last_remote_theme_probe_output = raw_output or ""
+        self._last_remote_theme_probe_output = raw_output or challenge_output or ""
 
         if code != 0 and not raw_output:
             return []
@@ -10477,14 +10945,18 @@ class ShopifyUtilitiesApp:
                 cmd_blocks: list[str] = [
                     _as_cmdline(["docker", "version"]),
                     _as_cmdline(["docker", "info"]),
-                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify version"]),
-                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify theme list --json < /dev/null || shopify theme list < /dev/null"]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "timeout 20s sh -c 'shopify version < /dev/null'"]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "timeout 20s sh -c 'shopify theme list --json < /dev/null || shopify theme list < /dev/null'"]),
                 ]
                 for candidate in store_candidates:
+                    candidate_cmd = (
+                        f"shopify theme list --store \"{candidate}\" --json < /dev/null "
+                        f"|| shopify theme list --store \"{candidate}\" < /dev/null"
+                    )
                     cmd_blocks.append(
                         _as_cmdline([
                             "docker", "exec", container, "sh", "-c",
-                            f"shopify theme list --store \"{candidate}\" --json < /dev/null || shopify theme list --store \"{candidate}\" < /dev/null",
+                            f"timeout 20s sh -c {shlex.quote(candidate_cmd)}",
                         ])
                     )
 
@@ -10515,7 +10987,7 @@ class ShopifyUtilitiesApp:
                 for cmdline in cmd_blocks:
                     bat_lines.extend([
                         f"echo [CMD] {cmdline} >> \"%LOGFILE%\"",
-                        f"{cmdline} >> \"%LOGFILE%\" 2>&1",
+                        f"{cmdline} < NUL >> \"%LOGFILE%\" 2>&1",
                         "echo. >> \"%LOGFILE%\"",
                     ])
 
@@ -10543,6 +11015,66 @@ class ShopifyUtilitiesApp:
             except Exception:
                 return None
 
+        def _open_interactive_shopify_auth_terminal(container: str, store_url: str) -> bool:
+            safe_store = (store_url or "").replace('"', '').replace("'", "").strip()
+            parsed = urllib.parse.urlparse(safe_store if "://" in safe_store else f"https://{safe_store}")
+            host = (parsed.netloc or parsed.path or "").strip().strip("/")
+            candidate = host or safe_store
+            if candidate.lower().startswith("www."):
+                candidate = candidate[4:]
+            candidate = candidate.replace('"', "").replace("'", "")
+
+            try:
+                if candidate:
+                    login_cmd = (
+                        f"docker exec -it {container} sh -lc "
+                        f"\"shopify auth logout >/dev/null 2>&1 || true; "
+                        f"shopify auth login; "
+                        f"shopify theme list --store {candidate} --json || shopify theme list --store {candidate}\""
+                    )
+                else:
+                    login_cmd = (
+                        f"docker exec -it {container} sh -lc "
+                        f"\"shopify auth logout >/dev/null 2>&1 || true; shopify auth login\""
+                    )
+
+                bat_lines = [
+                    "@echo off",
+                    "setlocal",
+                ]
+                if self.docker_mode == "remote" and self.docker_host:
+                    bat_lines.extend([
+                        f"set DOCKER_HOST={self.docker_host}",
+                        "set DOCKER_CONTEXT=",
+                        "set DOCKER_TLS_VERIFY=",
+                        "set DOCKER_CERT_PATH=",
+                        "set DOCKER_TLS=",
+                    ])
+                bat_lines.extend([
+                    "echo ==================================================",
+                    "echo Shopify Auth Interactivo",
+                    f"echo Contenedor: {container}",
+                    "echo Completa el login; al final se probara `theme list` automaticamente.",
+                    "echo ==================================================",
+                    login_cmd,
+                    "echo.",
+                    "echo Cierra esta ventana cuando termines el login.",
+                    "pause",
+                ])
+
+                fd_auth, bat_path_auth = tempfile.mkstemp(prefix="shu_auth_interactive_", suffix=".bat")
+                with os.fdopen(fd_auth, "w", encoding="cp1252", errors="replace") as fh:
+                    fh.write("\r\n".join(bat_lines) + "\r\n")
+
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "Shopify Auth", "cmd.exe", "/k", bat_path_auth],
+                    shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
+                return True
+            except Exception:
+                return False
+
         def _refresh_remote_themes(show_feedback: bool = False) -> None:
             container = shopify_container_var.get().strip()
             store_url = store_url_var.get().strip()
@@ -10560,18 +11092,28 @@ class ShopifyUtilitiesApp:
                 return
 
             remote_loading_var.set("Consultando themes remotos...")
-            loading_modal = self._show_loading_modal("Listando temas remotos")
+            live = self._show_remote_theme_live_log()
 
             def _worker() -> None:
+                def _log(msg: str, kind: str = "info") -> None:
+                    live["log"](msg, kind)
+
                 def _show_auth_dialog(auth_code: str, auth_url: str, ack_event: threading.Event) -> None:
                     self._show_shopify_auth_dialog(auth_code, auth_url, ack_event)
 
                 try:
+                    _log(f"Contenedor: {container}", "cmd")
+                    _log(f"Tienda: {store_url}", "cmd")
+                    _log("Ejecutando: shopify theme list ...", "info")
+
                     themes = self._list_remote_themes_for_export(container, store_url)
                     if themes:
+                        _log(f"✔ {len(themes)} tema(s) encontrado(s).", "ok")
+                        for tid, tname in themes:
+                            _log(f"   → [{tid}] {tname}", "ok")
+                        live["close"](True)
                         self.root.after(0, lambda: _apply_remote_theme_values(themes, _compose_export_theme_selection()))
                         self.root.after(0, lambda: remote_loading_var.set(f"Temas remotos cargados: {len(themes)}"))
-                        self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
                         return
 
                     probe_output = str(getattr(self, "_last_remote_theme_probe_output", "") or "")
@@ -10581,174 +11123,146 @@ class ShopifyUtilitiesApp:
                         flags=re.IGNORECASE,
                     ))
 
-                    auth_ok_code, auth_ok_out, auth_ok_err = self._run([
-                        "docker", "exec", container, "sh", "-c", "test -f /tmp/shopify_auth_ok && echo OK || true"
-                    ])
-                    auth_marker_present = auth_ok_code == 0 and "OK" in "\n".join([auth_ok_out or "", auth_ok_err or ""])
+                    if probe_output:
+                        _log("Respuesta de Shopify CLI:", "warn")
+                        for line in probe_output.splitlines()[:8]:
+                            if line.strip():
+                                _log(f"  {line.strip()}", "cmd")
 
-                    if login_required and auth_marker_present:
-                        self._run(["docker", "exec", container, "sh", "-c", "rm -f /tmp/shopify_auth_ok 2>/dev/null || true"])
-                        auth_marker_present = False
+                    # Siempre limpiar el marker para forzar re-autenticación si no hay temas
+                    _log("Limpiando marcador de sesión anterior para forzar nuevo login...", "info")
+                    self._run(["docker", "exec", container, "sh", "-c", "rm -f /tmp/shopify_auth.log /tmp/shopify_auth_ok 2>/dev/null || true"])
 
-                    if auth_marker_present:
-                        debug_log_path = _open_remote_theme_debug_terminal(container, store_url)
-                        self.root.after(
-                            0,
-                            lambda: remote_loading_var.set(
-                                "Shopify CLI ya esta autenticado, pero no se devolvieron temas para esa tienda."
-                            ),
-                        )
-                        if show_feedback:
-                            self.root.after(
-                                0,
-                                lambda: messagebox.showinfo(
-                                    "Exportar",
-                                    (
-                                        "Shopify CLI ya esta autenticado, pero no se encontraron temas remotos para la URL indicada.\n\n"
-                                        + (f"Se abrio terminal de diagnostico. Log: {debug_log_path}" if debug_log_path else "No se pudo abrir la terminal de diagnostico.")
-                                    ),
-                                ),
-                            )
-                        self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
-                        return
-
-                    auth_prompt = self._extract_shopify_auth_challenge(probe_output)
+                    # Lanzar auth login inmediatamente sin verificar si hay challenge en probe
+                    _log("🔑 Iniciando flujo de autenticacion con Shopify CLI...", "auth")
+                    _log("Limpiando logs previos y lanzando 'shopify auth login'...", "info")
+                    _log("Esperando que el CLI genere el código de verificacion (puede tomar un momento)...", "info")
+                    
+                    auth_prompt = None
+                    auth_login_launched = False
+                    interactive_auth_used = False
+                    
+                    # Llamar con callback de logging para que el usuario vea el progreso
+                    auth_prompt = self._start_shopify_auth_and_get_challenge(
+                        container, 
+                        wait_seconds=90, 
+                        store_url=store_url,
+                        log_callback=_log
+                    )
+                    auth_login_launched = bool(auth_prompt)
+                    
                     if not auth_prompt:
-                        auth_prompt = self._start_shopify_auth_and_get_challenge(container)
-                    if not auth_prompt:
-                        safe_store = store_url.replace('"', '').replace("'", "")
-                        docker_login_args = self._build_docker_command([
-                            "docker", "exec", "-it", container, "sh", "-c", "shopify auth login"
-                        ])
-                        docker_touch_args = self._build_docker_command([
-                            "docker", "exec", container, "sh", "-c", "touch /tmp/shopify_auth_ok"
-                        ])
-                        if docker_login_args and docker_login_args[0].lower() == "docker":
-                            try:
-                                docker_login_args[0] = self._resolver_comando("docker")
-                            except Exception:
-                                pass
-                        if docker_touch_args and docker_touch_args[0].lower() == "docker":
-                            try:
-                                docker_touch_args[0] = self._resolver_comando("docker")
-                            except Exception:
-                                pass
-                        docker_login_cmd = subprocess.list2cmdline(docker_login_args)
-                        docker_touch_cmd = subprocess.list2cmdline(docker_touch_args)
-                        bat_lines = [
-                            "@echo off",
-                            "echo Iniciando autenticacion Shopify CLI...",
-                            "echo.",
-                        ]
-                        if self.docker_mode == "remote" and self.docker_host:
-                            bat_lines.extend([
-                                f"set DOCKER_HOST={self.docker_host}",
-                                "set DOCKER_CONTEXT=",
-                                "set DOCKER_TLS_VERIFY=",
-                                "set DOCKER_CERT_PATH=",
-                                "set DOCKER_TLS=",
-                                "echo Docker remoto: %DOCKER_HOST%",
-                                "echo.",
-                            ])
-                        bat_lines.extend([
-                            docker_login_cmd,
-                            "IF %ERRORLEVEL% EQU 0 (",
-                            f"  {docker_touch_cmd}",
-                            ")",
-                            "echo.",
-                            "echo Si el login fue correcto, vuelve a la app y pulsa 'Listar temas remotos'.",
-                            "pause",
-                        ])
-                        bat_content = "\r\n".join(bat_lines) + "\r\n"
-                        launched_terminal = False
-                        fd_auth, bat_path_auth = tempfile.mkstemp(prefix="shu_auth_", suffix=".bat")
-                        try:
-                            with os.fdopen(fd_auth, "w", encoding="cp1252", errors="replace") as fh:
-                                fh.write(bat_content)
-                            subprocess.Popen(
-                                ["cmd.exe", "/c", "start", "Shopify Login", "cmd.exe", "/c", bat_path_auth],
-                                shell=False,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        _log("✘ No se pudo obtener el challenge automaticamente.", "err")
+                        _log("Abriendo autenticación interactiva en terminal (igual que en setup)...", "info")
+                        launched_interactive = _open_interactive_shopify_auth_terminal(container, store_url)
+                        if not launched_interactive:
+                            _log("✘ No se pudo abrir la terminal de autenticación interactiva.", "err")
+                            live["close"](False)
+                            self.root.after(0, lambda: remote_loading_var.set("No se pudo abrir terminal de autenticación Shopify."))
+                            return
+
+                        user_ack = [False]
+                        user_ack_event = threading.Event()
+
+                        def _ask_interactive_done() -> None:
+                            user_ack[0] = messagebox.askyesno(
+                                "Autenticación Shopify",
+                                "Se abrió una terminal interactiva para 'shopify auth login'.\n\n"
+                                "1) Completa el login en esa terminal\n"
+                                "2) Cierra la terminal\n"
+                                "3) Pulsa 'Sí' para reintentar el listado remoto\n\n"
+                                "Pulsa 'No' para cancelar.",
                             )
-                            launched_terminal = True
-                        except Exception:
-                            launched_terminal = False
+                            user_ack_event.set()
 
-                        if launched_terminal:
-                            self.root.after(0, lambda: remote_loading_var.set("Terminal de login abierta. Completa la autenticacion y vuelve a listar temas."))
-                            self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
-                            if show_feedback:
-                                self.root.after(
-                                    0,
-                                    lambda: messagebox.showinfo(
-                                        "Exportar",
-                                        "Se abrio una terminal para autenticar Shopify CLI.\n\nCompleta el login y luego pulsa 'Listar temas remotos' otra vez.",
-                                    ),
-                                )
-                        else:
-                            self.root.after(0, lambda: remote_loading_var.set("No se encontro challenge de login y no se pudo abrir la terminal de autenticacion."))
-                            self.root.after(
-                                0,
-                                lambda: self._finish_loading_modal(
-                                    loading_modal,
-                                    False,
-                                    error_msg="No se pudo abrir la terminal de autenticacion.",
-                                ),
-                            )
-                            if show_feedback:
-                                self.root.after(
-                                    0,
-                                    lambda: messagebox.showinfo(
-                                        "Exportar",
-                                        "No se pudieron listar temas remotos. Shopify CLI no devolvio challenge y no se pudo abrir terminal de login.",
-                                    ),
-                                )
-                        return
+                        self.root.after(0, _ask_interactive_done)
+                        if not user_ack_event.wait(timeout=900):
+                            _log("⏱ Timeout esperando confirmación del login interactivo.", "warn")
+                            live["close"](False)
+                            self.root.after(0, lambda: remote_loading_var.set("Timeout esperando login interactivo."))
+                            return
+                        if not user_ack[0]:
+                            _log("Usuario canceló el login interactivo.", "warn")
+                            live["close"](False)
+                            self.root.after(0, lambda: remote_loading_var.set("Autenticación cancelada por el usuario."))
+                            return
 
-                    auth_code, auth_url = auth_prompt
-                    auth_ack = threading.Event()
-                    self.root.after(0, lambda: _show_auth_dialog(auth_code or "----", auth_url, auth_ack))
-                    if not auth_ack.wait(timeout=600):
-                        self.root.after(0, lambda: remote_loading_var.set("Autenticacion cancelada o agotada."))
-                        return
+                        interactive_auth_used = True
+                        _log("✔ Login interactivo confirmado por el usuario.", "ok")
 
+                    if auth_prompt:
+                        auth_code, auth_url = auth_prompt
+                        _log(f"🔑 Código de verificacion: {auth_code}", "auth")
+                        _log(f"   URL: {auth_url}", "cmd")
+                        _log("Mostrando diálogo de autenticacion al usuario...", "info")
+                        auth_ack = threading.Event()
+                        self.root.after(0, lambda: _show_auth_dialog(auth_code or "----", auth_url, auth_ack))
+                        if not auth_ack.wait(timeout=600):
+                            _log("✘ Autenticacion cancelada o tiempo agotado.", "err")
+                            live["close"](False)
+                            self.root.after(0, lambda: remote_loading_var.set("Autenticacion cancelada o agotada."))
+                            return
+
+                        _log("Usuario confirmó el diálogo. Esperando confirmacion del token en el contenedor...", "info")
+                        if auth_login_launched:
+                            auth_complete_deadline = time.time() + 300.0
+                            while time.time() < auth_complete_deadline:
+                                _, auth_log_out, _ = self._run([
+                                    "docker", "exec", container, "sh", "-c",
+                                    "cat /tmp/shopify_auth.log 2>/dev/null || true"
+                                ])
+                                auth_log_text = (auth_log_out or "").strip()
+                                if auth_log_text and not self._extract_shopify_auth_challenge(auth_log_text):
+                                    _log("✔ Token OAuth recibido y guardado por el CLI.", "ok")
+                                    self._run(["docker", "exec", container, "sh", "-c", "touch /tmp/shopify_auth_ok"])
+                                    break
+                                # Mostrar últimas líneas del log de auth en la ventana
+                                if auth_log_text:
+                                    last_line = auth_log_text.splitlines()[-1].strip()
+                                    if last_line:
+                                        _log(f"   auth.log: {last_line}", "cmd")
+                                remaining_auth = int(max(0.0, auth_complete_deadline - time.time()))
+                                _log(f"Esperando confirmacion del login en el contenedor... ({remaining_auth}s)", "info")
+                                self.root.after(0, lambda r=remaining_auth: remote_loading_var.set(f"Esperando confirmacion del login Shopify en el contenedor... ({r}s)"))
+                                time.sleep(2.0)
+                    elif interactive_auth_used:
+                        _log("Reintentando listado con sesión obtenida en terminal interactiva...", "info")
+
+                    _log("Ejecutando shopify theme list con token recibido...", "info")
                     themes = []
-                    for _ in range(3):
+                    deadline = time.time() + 60.0
+                    while time.time() < deadline:
                         themes = self._list_remote_themes_for_export(container, store_url)
                         if themes:
                             break
-                        time.sleep(1.5)
+                        probe_after_auth = str(getattr(self, "_last_remote_theme_probe_output", "") or "")
+                        if self._extract_shopify_auth_challenge(probe_after_auth):
+                            remaining = int(max(0.0, deadline - time.time()))
+                            _log(f"CLI sigue pidiendo auth. Reintentando... ({remaining}s)", "warn")
+                            self.root.after(0, lambda r=remaining: remote_loading_var.set(f"Esperando finalizacion del login Shopify... ({r}s)"))
+                            time.sleep(2.0)
+                            continue
+                        break
+
+                    if themes:
+                        _log(f"✔ {len(themes)} tema(s) encontrado(s).", "ok")
+                        for tid, tname in themes:
+                            _log(f"   → [{tid}] {tname}", "ok")
+                        live["close"](True)
+                    else:
+                        _log("✘ No se encontraron temas remotos tras autenticar.", "err")
+                        _log("Comprueba que la URL de la tienda es correcta y que el CLI tiene acceso.", "warn")
+                        live["close"](False)
 
                     self.root.after(0, lambda: _apply_remote_theme_values(themes, _compose_export_theme_selection()))
-                    self.root.after(
-                        0,
-                        lambda: remote_loading_var.set(
-                            f"Temas remotos cargados: {len(themes)}" if themes else "No se encontraron themes remotos tras autenticar."
-                        ),
-                    )
-                    if show_feedback and not themes:
-                        debug_log_path = _open_remote_theme_debug_terminal(container, store_url)
-                        self.root.after(
-                            0,
-                            lambda: messagebox.showinfo(
-                                "Exportar",
-                                (
-                                    "Shopify CLI ya autentico, pero no devolvio temas remotos para esa tienda.\n\n"
-                                    + (f"Se abrio terminal de diagnostico. Log: {debug_log_path}" if debug_log_path else "No se pudo abrir la terminal de diagnostico.")
-                                ),
-                            ),
-                        )
-                    self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
+                    self.root.after(0, lambda: remote_loading_var.set(
+                        f"Temas remotos cargados: {len(themes)}" if themes else "No se encontraron themes remotos tras autenticar."
+                    ))
+
                 except Exception as exc:
+                    live["log"](f"✘ Excepción inesperada: {exc}", "err")
+                    live["close"](False)
                     self.root.after(0, lambda: remote_loading_var.set(f"Error al listar themes remotos: {exc}"))
-                    self.root.after(
-                        0,
-                        lambda: self._finish_loading_modal(
-                            loading_modal,
-                            False,
-                            error_msg=str(exc),
-                        ),
-                    )
                     if show_feedback:
                         self.root.after(0, lambda: messagebox.showinfo("Exportar", f"No se pudieron listar temas remotos.\n\n{exc}"))
 
@@ -11864,6 +12378,12 @@ class ShopifyUtilitiesApp:
                 f"echo '=== .json count ==='; find {theme_container_path} -name '*.json' | wc -l"
             ])
             dbg(f"Contenido contenedor tras extracción:\n{ls_out}")
+            # Limpiar plantillas y locales duplicados para evitar errores de upload.
+            self._normalize_theme_templates(shopify_container, theme_container_path)
+            dbg(f"Plantillas normalizadas en: {theme_container_path}/templates")
+            # Normalizar locales para evitar errores de upload por duplicados/defaults.
+            self._normalize_theme_locales(shopify_container, theme_container_path)
+            dbg(f"Locales normalizados en: {theme_container_path}/locales")
             # --- AUTO-FIX DE SETTINGS_DATA.JSON ---
             events.put(("progress", (45.0, "[Auto-Fix] Validando settings_data.json...")))
             auto_fix_js = r"""
@@ -12050,6 +12570,16 @@ try {
                 dbg("Reiniciando contenedor para aplicar tema activo...")
                 rs_code, rs_out, rs_err = self._run(["docker", "restart", shopify_container])
                 dbg(f"restart resultado: code={rs_code}, stdout={rs_out}, stderr={rs_err}")
+                events.put(("progress", (94.0, "[3/3] Reiniciando contenedor una vez mas para finalizar...")))
+                events.put(("progress", (93.0, "[3/3] Esperando 10s antes del segundo reinicio...")))
+                for _ in range(10):
+                    check_cancel()
+                    time.sleep(1.0)
+                dbg("Reiniciando contenedor una vez mas para finalizar importacion...")
+                rs2_code, rs2_out, rs2_err = self._run(["docker", "restart", shopify_container])
+                dbg(f"segundo restart resultado: code={rs2_code}, stdout={rs2_out}, stderr={rs2_err}")
+                if rs2_code != 0:
+                    raise RuntimeError(rs2_err or "No se pudo ejecutar el segundo reinicio del contenedor.")
                 dbg("=== IMPORT LOCAL FINALIZADO ===")
                 events.put(("done", theme_container_path))
                 events.put(("workspace_ready", (shopify_container, theme_path)))
@@ -12183,6 +12713,16 @@ try {
             dbg("Reiniciando contenedor tras push para aplicar tema activo...")
             rs_code, rs_out, rs_err = self._run(["docker", "restart", shopify_container])
             dbg(f"restart resultado: code={rs_code}, stdout={rs_out}, stderr={rs_err}")
+            events.put(("progress", (97.0, "[3/3] Reiniciando contenedor una vez mas para finalizar...")))
+            events.put(("progress", (96.0, "[3/3] Esperando 10s antes del segundo reinicio...")))
+            for _ in range(10):
+                check_cancel()
+                time.sleep(1.0)
+            dbg("Reiniciando contenedor una vez mas para finalizar importacion...")
+            rs2_code, rs2_out, rs2_err = self._run(["docker", "restart", shopify_container])
+            dbg(f"segundo restart resultado: code={rs2_code}, stdout={rs2_out}, stderr={rs2_err}")
+            if rs2_code != 0:
+                raise RuntimeError(rs2_err or "No se pudo ejecutar el segundo reinicio del contenedor.")
 
             events.put(("done", theme_container_path))
         except Exception as exc:
