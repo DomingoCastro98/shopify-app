@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.8"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.9"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -10018,7 +10018,7 @@ class ShopifyUtilitiesApp:
             host = (parsed.netloc or parsed.path or "").strip()
             host = host.split("/", 1)[0].strip().rstrip("/")
             if host.lower().startswith("www."):
-                _add(host[4:])
+                host = host[4:]
             _add(host)
 
             host_no_www = host[4:] if host.lower().startswith("www.") else host
@@ -10472,7 +10472,6 @@ class ShopifyUtilitiesApp:
                     _as_cmdline(["docker", "version"]),
                     _as_cmdline(["docker", "info"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify version"]),
-                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify auth --help < /dev/null"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify theme list --json < /dev/null || shopify theme list < /dev/null"]),
                 ]
                 for candidate in store_candidates:
