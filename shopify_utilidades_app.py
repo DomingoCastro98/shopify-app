@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.9"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.10"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -10067,11 +10067,14 @@ class ShopifyUtilitiesApp:
                 f" || shopify theme list --store \"{store_candidate}\" < /dev/null"
             )
             code, raw_output = _run_theme_list(cmd_with_store)
-            if raw_output:
+            if raw_output and not self._extract_shopify_auth_challenge(raw_output):
                 break
+            raw_output = ""
 
         if not raw_output:
             code, raw_output = _run_theme_list("shopify theme list --json < /dev/null || shopify theme list < /dev/null")
+            if raw_output and self._extract_shopify_auth_challenge(raw_output):
+                raw_output = ""
 
         self._last_remote_theme_probe_output = raw_output or ""
 
@@ -10132,6 +10135,9 @@ class ShopifyUtilitiesApp:
 
         if parsed:
             return _dedupe(parsed)
+
+        if self._extract_shopify_auth_challenge(raw_output):
+            return []
 
         for raw_line in raw_output.splitlines():
             line = re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", raw_line).strip()
