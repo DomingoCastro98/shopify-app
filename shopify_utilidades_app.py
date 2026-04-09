@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.6"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.7"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -9982,6 +9982,7 @@ class ShopifyUtilitiesApp:
 
     def _list_remote_themes_for_export(self, shopify_container: str, store_url: str) -> list[tuple[str, str]]:
         """Devuelve temas remotos como pares (id, nombre) usando Shopify CLI."""
+        self._last_remote_theme_probe_output = ""
         if not shopify_container or not store_url:
             return []
 
@@ -10155,6 +10156,8 @@ class ShopifyUtilitiesApp:
 
         if not raw_output:
             code, raw_output = _run_theme_list("shopify theme list --json < /dev/null || shopify theme list < /dev/null")
+
+        self._last_remote_theme_probe_output = raw_output or ""
 
         if code != 0 and not raw_output:
             return []
@@ -10546,13 +10549,7 @@ class ShopifyUtilitiesApp:
                     _as_cmdline(["docker", "version"]),
                     _as_cmdline(["docker", "info"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify version"]),
-                    _as_cmdline([
-                        "docker", "exec", container, "sh", "-c",
-                        "shopify whoami --json < /dev/null "
-                        "|| shopify whoami < /dev/null "
-                        "|| shopify auth list --json < /dev/null "
-                        "|| shopify auth list < /dev/null",
-                    ]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify auth list --json < /dev/null || shopify auth list < /dev/null || shopify auth --help < /dev/null"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify theme list --json < /dev/null || shopify theme list < /dev/null"]),
                 ]
                 for candidate in store_candidates:
@@ -10649,10 +10646,21 @@ class ShopifyUtilitiesApp:
                         self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
                         return
 
+                    probe_output = str(getattr(self, "_last_remote_theme_probe_output", "") or "")
+                    login_required = bool(re.search(
+                        r"log in to Shopify|verification code|activate-with-code|autentic|login",
+                        probe_output,
+                        flags=re.IGNORECASE,
+                    ))
+
                     auth_ok_code, auth_ok_out, auth_ok_err = self._run([
                         "docker", "exec", container, "sh", "-c", "test -f /tmp/shopify_auth_ok && echo OK || true"
                     ])
                     auth_marker_present = auth_ok_code == 0 and "OK" in "\n".join([auth_ok_out or "", auth_ok_err or ""])
+
+                    if login_required and auth_marker_present:
+                        self._run(["docker", "exec", container, "sh", "-c", "rm -f /tmp/shopify_auth_ok 2>/dev/null || true"])
+                        auth_marker_present = False
 
                     if auth_marker_present:
                         debug_log_path = _open_remote_theme_debug_terminal(container, store_url)
