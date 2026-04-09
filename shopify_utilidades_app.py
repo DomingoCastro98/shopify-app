@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.5"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.6"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -10050,7 +10050,7 @@ class ShopifyUtilitiesApp:
             except Exception:
                 return 1, ""
 
-        def _extract_store_candidates_from_auth_status(output: str) -> list[str]:
+        def _extract_store_candidates_from_auth_output(output: str) -> list[str]:
             discovered: list[str] = []
             seen: set[str] = set()
 
@@ -10136,8 +10136,13 @@ class ShopifyUtilitiesApp:
                 break
 
         if not raw_output:
-            _auth_code, auth_output = _run_theme_list("shopify auth status --json < /dev/null || shopify auth status < /dev/null")
-            for auth_store in _extract_store_candidates_from_auth_status(auth_output):
+            _auth_code, auth_output = _run_theme_list(
+                "shopify whoami --json < /dev/null "
+                "|| shopify whoami < /dev/null "
+                "|| shopify auth list --json < /dev/null "
+                "|| shopify auth list < /dev/null"
+            )
+            for auth_store in _extract_store_candidates_from_auth_output(auth_output):
                 if auth_store.casefold() in {x.casefold() for x in store_candidates}:
                     continue
                 cmd_with_store = (
@@ -10541,7 +10546,13 @@ class ShopifyUtilitiesApp:
                     _as_cmdline(["docker", "version"]),
                     _as_cmdline(["docker", "info"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify version"]),
-                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify auth status --json < /dev/null || shopify auth status < /dev/null"]),
+                    _as_cmdline([
+                        "docker", "exec", container, "sh", "-c",
+                        "shopify whoami --json < /dev/null "
+                        "|| shopify whoami < /dev/null "
+                        "|| shopify auth list --json < /dev/null "
+                        "|| shopify auth list < /dev/null",
+                    ]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify theme list --json < /dev/null || shopify theme list < /dev/null"]),
                 ]
                 for candidate in store_candidates:
