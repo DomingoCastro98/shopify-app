@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.9"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.1.10"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -2660,14 +2660,14 @@ class ShopifyUtilitiesApp:
 
         # Para operaciones largas (import/export/copia/exec/logs) evitar
         # timeout fijo de lectura, ya que depende del tamano de datos y rendimiento del host remoto.
-        if cmd in {"cp", "exec", "run", "logs"}:
+        if cmd in {"cp", "exec", "run", "logs", "pull"}:
             try:
                 client.api.timeout = None
             except Exception:
                 pass
 
         op_timeout: int | None = 5
-        if cmd in {"cp", "exec", "run", "logs"}:
+        if cmd in {"cp", "exec", "run", "logs", "pull"}:
             op_timeout = None
         elif cmd in {"start", "stop", "restart", "rm", "network", "volume"}:
             op_timeout = 30
@@ -2868,6 +2868,54 @@ class ShopifyUtilitiesApp:
                                 names.append(name)
                     return 0, " ".join(names), ""
                 return 1, "", "docker inspect: formato no soportado"
+
+            if cmd == "image":
+                if not rest:
+                    return 1, "", "docker image: falta subcomando"
+                sub = rest[0]
+                sub_args = rest[1:]
+                if sub == "inspect":
+                    if not sub_args:
+                        return 1, "", "docker image inspect: falta imagen"
+                    payload: list[dict[str, object]] = []
+                    for image_ref in sub_args:
+                        image = client.images.get(image_ref)
+                        payload.append(image.attrs)
+                    return 0, json.dumps(payload, ensure_ascii=False, indent=2), ""
+                if sub == "ls":
+                    fmt = ""
+                    if "--format" in sub_args:
+                        idx = sub_args.index("--format")
+                        if idx + 1 < len(sub_args):
+                            fmt = sub_args[idx + 1]
+                    lines: list[str] = []
+                    for image in client.images.list():
+                        attrs = getattr(image, "attrs", {}) or {}
+                        repo_tags = attrs.get("RepoTags", []) or []
+                        image_id = str(attrs.get("Id", ""))
+                        tag_text = "<none>"
+                        if repo_tags:
+                            tag_text = ",".join(str(tag) for tag in repo_tags)
+                        if fmt:
+                            line = fmt.replace("{{.Repository}}", tag_text).replace(
+                                "{{.ID}}", image_id)
+                        else:
+                            line = f"{tag_text}|{image_id}"
+                        lines.append(line)
+                    return 0, "\n".join(lines), ""
+                return 1, "", f"Subcomando image no soportado: {sub}"
+
+            if cmd == "pull":
+                if not rest:
+                    return 1, "", "docker pull: falta imagen"
+                image_ref = rest[-1]
+                if ":" in image_ref and not image_ref.startswith("sha256:"):
+                    repo, tag = image_ref.rsplit(":", 1)
+                    image = client.images.pull(repo, tag=tag)
+                else:
+                    image = client.images.pull(image_ref)
+                image_id = getattr(image, "id", "") or ""
+                return 0, image_id, ""
 
             if cmd == "port":
                 if not rest:
