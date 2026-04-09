@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.1.10"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.0"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -3290,6 +3290,22 @@ class ShopifyUtilitiesApp:
             host = f"{host}:{detected_port}"
 
         return f"tcp://{host}"
+
+    @staticmethod
+    def _normalize_docker_resource_name(raw_name: str, fallback: str) -> str:
+        name = (raw_name or "").strip().strip('"').strip("'")
+        if not name:
+            return fallback
+
+        if "?" in name or "=" in name:
+            tail = name.split("?", 1)[-1]
+            if "=" in tail:
+                candidate = tail.rsplit("=", 1)[-1].strip()
+                if candidate:
+                    name = candidate
+
+        name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name).strip("-._")
+        return name or fallback
 
     def _is_tcp_open(self, host: str, port: int, timeout: float = 0.8) -> bool:
         try:
@@ -8212,6 +8228,10 @@ class ShopifyUtilitiesApp:
         store_password: str,
         auto_pull: bool,
     ) -> None:
+        shopify_container = self._normalize_docker_resource_name(shopify_container, "shopify-dev1")
+        network_name = self._normalize_docker_resource_name(network_name, "shopify-network1")
+        shopify_volume = self._normalize_docker_resource_name(shopify_volume, "shopifydata1")
+
         required_fields = [
             (shopify_container, "Contenedor Shopify CLI"),
             (network_name, "Network Docker"),
