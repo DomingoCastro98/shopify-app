@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.4"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.5"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -10498,6 +10498,115 @@ class ShopifyUtilitiesApp:
                         detail_lines.append(f"Detalle docker exec: {(err_dbg or '').strip()[:300]}")
                     messagebox.showinfo("Exportar", "\n".join(detail_lines))
 
+        def _open_remote_theme_debug_terminal(container: str, store_url: str) -> str | None:
+            safe_store = (store_url or "").replace('"', '').replace("'", "").strip()
+            parsed = urllib.parse.urlparse(safe_store if "://" in safe_store else f"https://{safe_store}")
+            host = (parsed.netloc or parsed.path or "").strip().strip("/")
+            host = host.split("/", 1)[0].strip()
+            if host.lower().startswith("www."):
+                host = host[4:]
+            slug = host.split(".", 1)[0].strip() if host else ""
+            store_candidates: list[str] = []
+            seen_candidates: set[str] = set()
+
+            def _add_store(value: str) -> None:
+                item = (value or "").strip().strip("/")
+                if not item:
+                    return
+                key = item.casefold()
+                if key in seen_candidates:
+                    return
+                seen_candidates.add(key)
+                store_candidates.append(item)
+
+            _add_store(safe_store)
+            _add_store(host)
+            if slug:
+                _add_store(f"{slug}.myshopify.com")
+
+            def _as_cmdline(args: list[str]) -> str:
+                final_args = self._build_docker_command(args)
+                if final_args and final_args[0].lower() == "docker":
+                    try:
+                        final_args[0] = self._resolver_comando("docker")
+                    except Exception:
+                        pass
+                return subprocess.list2cmdline(final_args)
+
+            try:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_path = os.path.join(tempfile.gettempdir(), f"shu_remote_theme_debug_{stamp}.log")
+
+                cmd_blocks: list[str] = [
+                    _as_cmdline(["docker", "version"]),
+                    _as_cmdline(["docker", "info"]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify version"]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify auth status --json < /dev/null || shopify auth status < /dev/null"]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify theme list --json < /dev/null || shopify theme list < /dev/null"]),
+                ]
+                for candidate in store_candidates:
+                    cmd_blocks.append(
+                        _as_cmdline([
+                            "docker", "exec", container, "sh", "-c",
+                            f"shopify theme list --store \"{candidate}\" --json < /dev/null || shopify theme list --store \"{candidate}\" < /dev/null",
+                        ])
+                    )
+
+                bat_lines = [
+                    "@echo off",
+                    "setlocal",
+                    f"set LOGFILE={log_path}",
+                    "echo ================================================== > \"%LOGFILE%\"",
+                    "echo Shopify Remote Theme Debug >> \"%LOGFILE%\"",
+                    "echo Fecha/Hora: %DATE% %TIME% >> \"%LOGFILE%\"",
+                    f"echo Contenedor: {container} >> \"%LOGFILE%\"",
+                    f"echo Store ingresado: {safe_store} >> \"%LOGFILE%\"",
+                    "echo ================================================== >> \"%LOGFILE%\"",
+                    "",
+                ]
+
+                if self.docker_mode == "remote" and self.docker_host:
+                    bat_lines.extend([
+                        f"set DOCKER_HOST={self.docker_host}",
+                        "set DOCKER_CONTEXT=",
+                        "set DOCKER_TLS_VERIFY=",
+                        "set DOCKER_CERT_PATH=",
+                        "set DOCKER_TLS=",
+                        "echo Docker remoto: %DOCKER_HOST% >> \"%LOGFILE%\"",
+                        "echo. >> \"%LOGFILE%\"",
+                    ])
+
+                for cmdline in cmd_blocks:
+                    bat_lines.extend([
+                        f"echo [CMD] {cmdline} >> \"%LOGFILE%\"",
+                        f"{cmdline} >> \"%LOGFILE%\" 2>&1",
+                        "echo. >> \"%LOGFILE%\"",
+                    ])
+
+                bat_lines.extend([
+                    "echo ================================================== >> \"%LOGFILE%\"",
+                    "echo Fin del diagnostico. >> \"%LOGFILE%\"",
+                    "echo ================================================== >> \"%LOGFILE%\"",
+                    "type \"%LOGFILE%\"",
+                    "echo.",
+                    "echo Log guardado en:",
+                    "echo %LOGFILE%",
+                    "pause",
+                ])
+
+                fd_diag, bat_path_diag = tempfile.mkstemp(prefix="shu_theme_diag_", suffix=".bat")
+                with os.fdopen(fd_diag, "w", encoding="cp1252", errors="replace") as fh:
+                    fh.write("\r\n".join(bat_lines) + "\r\n")
+
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "Shopify Theme Debug", "cmd.exe", "/k", bat_path_diag],
+                    shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
+                return log_path
+            except Exception:
+                return None
+
         def _refresh_remote_themes(show_feedback: bool = False) -> None:
             container = shopify_container_var.get().strip()
             store_url = store_url_var.get().strip()
@@ -10535,6 +10644,7 @@ class ShopifyUtilitiesApp:
                     auth_marker_present = auth_ok_code == 0 and "OK" in "\n".join([auth_ok_out or "", auth_ok_err or ""])
 
                     if auth_marker_present:
+                        debug_log_path = _open_remote_theme_debug_terminal(container, store_url)
                         self.root.after(
                             0,
                             lambda: remote_loading_var.set(
@@ -10546,7 +10656,10 @@ class ShopifyUtilitiesApp:
                                 0,
                                 lambda: messagebox.showinfo(
                                     "Exportar",
-                                    "Shopify CLI ya esta autenticado, pero no se encontraron temas remotos para la URL indicada.",
+                                    (
+                                        "Shopify CLI ya esta autenticado, pero no se encontraron temas remotos para la URL indicada.\n\n"
+                                        + (f"Se abrio terminal de diagnostico. Log: {debug_log_path}" if debug_log_path else "No se pudo abrir la terminal de diagnostico.")
+                                    ),
                                 ),
                             )
                         self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
@@ -10665,11 +10778,15 @@ class ShopifyUtilitiesApp:
                         ),
                     )
                     if show_feedback and not themes:
+                        debug_log_path = _open_remote_theme_debug_terminal(container, store_url)
                         self.root.after(
                             0,
                             lambda: messagebox.showinfo(
                                 "Exportar",
-                                "Shopify CLI ya autentico, pero no devolvio temas remotos para esa tienda.",
+                                (
+                                    "Shopify CLI ya autentico, pero no devolvio temas remotos para esa tienda.\n\n"
+                                    + (f"Se abrio terminal de diagnostico. Log: {debug_log_path}" if debug_log_path else "No se pudo abrir la terminal de diagnostico.")
+                                ),
                             ),
                         )
                     self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
