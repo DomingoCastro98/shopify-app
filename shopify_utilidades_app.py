@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.0"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.1"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -3010,6 +3010,8 @@ class ShopifyUtilitiesApp:
                 network = None
                 user = None
                 entrypoint = None
+                working_dir = None
+                restart_policy: dict[str, str] | None = None
                 environment: dict[str, str] = {}
                 volumes: dict[str, dict[str, str]] = {}
                 ports: dict[str, object] = {}
@@ -3039,6 +3041,14 @@ class ShopifyUtilitiesApp:
                         continue
                     if token == "--entrypoint" and i + 1 < len(rest):
                         entrypoint = rest[i + 1]
+                        i += 2
+                        continue
+                    if token == "--restart" and i + 1 < len(rest):
+                        restart_policy = {"Name": rest[i + 1]}
+                        i += 2
+                        continue
+                    if token in {"-w", "--workdir"} and i + 1 < len(rest):
+                        working_dir = rest[i + 1]
                         i += 2
                         continue
                     if token == "-e" and i + 1 < len(rest):
@@ -3083,6 +3093,8 @@ class ShopifyUtilitiesApp:
                     network=network,
                     user=user,
                     entrypoint=entrypoint,
+                    working_dir=working_dir,
+                    restart_policy=restart_policy,
                     environment=environment or None,
                     volumes=volumes or None,
                     ports=ports or None,
