@@ -1,8 +1,8 @@
 {
-  "version": "1.2.7",
-  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.2.7/Shopify_Utilidades.exe",
+  "version": "1.2.8",
+  "download_url_exe": "https://github.com/DomingoCastro98/shopify-app/releases/download/v1.2.8/Shopify_Utilidades.exe",
   "download_url_py": "",
   "guide_url": "https://raw.githubusercontent.com/DomingoCastro98/shopify-app/main/guia_usuario.html",
   "download_url": "",
-  "notes": "Compatibilidad ampliada con Shopify CLI (whoami/auth list), diagnostico en CMD con log automatico y mejoras de deteccion de temas remotos."
+  "notes": "Ajuste final del flujo de temas remotos: challenge de login tomado desde theme list, store normalizado sin https y diagnostico CMD con log."
 }

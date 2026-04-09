@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.7"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.2.8"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -10001,6 +10001,13 @@ class ShopifyUtilitiesApp:
                 item = (value or "").strip().strip("/")
                 if not item:
                     return
+                if "://" in item:
+                    parsed_item = urllib.parse.urlparse(item)
+                    item = (parsed_item.netloc or parsed_item.path or "").strip().strip("/")
+                if not item:
+                    return
+                if item.lower().startswith("www."):
+                    item = item[4:]
                 key = item.casefold()
                 if key not in seen:
                     seen.add(key)
@@ -10051,79 +10058,6 @@ class ShopifyUtilitiesApp:
             except Exception:
                 return 1, ""
 
-        def _extract_store_candidates_from_auth_output(output: str) -> list[str]:
-            discovered: list[str] = []
-            seen: set[str] = set()
-
-            def _add(value: str) -> None:
-                item = (value or "").strip().strip("/")
-                if not item:
-                    return
-                if "://" in item:
-                    parsed_val = urllib.parse.urlparse(item)
-                    item = (parsed_val.netloc or parsed_val.path or "").strip().strip("/")
-                if not item:
-                    return
-                key = item.casefold()
-                if key in seen:
-                    return
-                seen.add(key)
-                discovered.append(item)
-
-            payload = output.strip()
-            if not payload:
-                return discovered
-
-            if not (payload.startswith("{") or payload.startswith("[")):
-                json_match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", payload)
-                if json_match:
-                    payload = json_match.group(1).strip()
-
-            try:
-                data = json.loads(payload)
-                scan: list[object] = []
-                if isinstance(data, dict):
-                    scan.append(data)
-                    for key in ("stores", "shop", "currentStore", "store"):
-                        value = data.get(key)
-                        if value is not None:
-                            scan.append(value)
-                elif isinstance(data, list):
-                    scan.extend(data)
-
-                for item in scan:
-                    if isinstance(item, dict):
-                        for key in (
-                            "shopDomain",
-                            "shop_domain",
-                            "myshopifyDomain",
-                            "myshopify_domain",
-                            "storeDomain",
-                            "store_domain",
-                            "domain",
-                            "hostname",
-                            "host",
-                            "url",
-                            "shop",
-                            "store",
-                        ):
-                            value = item.get(key)
-                            if isinstance(value, str):
-                                _add(value)
-                    elif isinstance(item, str):
-                        _add(item)
-            except Exception:
-                pass
-
-            for line in output.splitlines():
-                line_clean = line.strip()
-                if not line_clean:
-                    continue
-                for token in re.findall(r"[a-z0-9][a-z0-9-]*\.myshopify\.com", line_clean, flags=re.IGNORECASE):
-                    _add(token)
-
-            return discovered
-
         raw_output = ""
         code = 1
         store_candidates = _store_candidates(raw_store)
@@ -10135,24 +10069,6 @@ class ShopifyUtilitiesApp:
             code, raw_output = _run_theme_list(cmd_with_store)
             if raw_output:
                 break
-
-        if not raw_output:
-            _auth_code, auth_output = _run_theme_list(
-                "shopify whoami --json < /dev/null "
-                "|| shopify whoami < /dev/null "
-                "|| shopify auth list --json < /dev/null "
-                "|| shopify auth list < /dev/null"
-            )
-            for auth_store in _extract_store_candidates_from_auth_output(auth_output):
-                if auth_store.casefold() in {x.casefold() for x in store_candidates}:
-                    continue
-                cmd_with_store = (
-                    f"shopify theme list --store \"{auth_store}\" --json < /dev/null"
-                    f" || shopify theme list --store \"{auth_store}\" < /dev/null"
-                )
-                code, raw_output = _run_theme_list(cmd_with_store)
-                if raw_output:
-                    break
 
         if not raw_output:
             code, raw_output = _run_theme_list("shopify theme list --json < /dev/null || shopify theme list < /dev/null")
@@ -10521,6 +10437,13 @@ class ShopifyUtilitiesApp:
                 item = (value or "").strip().strip("/")
                 if not item:
                     return
+                if "://" in item:
+                    parsed_item = urllib.parse.urlparse(item)
+                    item = (parsed_item.netloc or parsed_item.path or "").strip().strip("/")
+                if not item:
+                    return
+                if item.lower().startswith("www."):
+                    item = item[4:]
                 key = item.casefold()
                 if key in seen_candidates:
                     return
@@ -10549,7 +10472,7 @@ class ShopifyUtilitiesApp:
                     _as_cmdline(["docker", "version"]),
                     _as_cmdline(["docker", "info"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify version"]),
-                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify auth list --json < /dev/null || shopify auth list < /dev/null || shopify auth --help < /dev/null"]),
+                    _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify auth --help < /dev/null"]),
                     _as_cmdline(["docker", "exec", container, "sh", "-c", "shopify theme list --json < /dev/null || shopify theme list < /dev/null"]),
                 ]
                 for candidate in store_candidates:
@@ -10684,7 +10607,9 @@ class ShopifyUtilitiesApp:
                         self.root.after(0, lambda: self._finish_loading_modal(loading_modal, True, auto_close_success_ms=450))
                         return
 
-                    auth_prompt = self._start_shopify_auth_and_get_challenge(container)
+                    auth_prompt = self._extract_shopify_auth_challenge(probe_output)
+                    if not auth_prompt:
+                        auth_prompt = self._start_shopify_auth_and_get_challenge(container)
                     if not auth_prompt:
                         safe_store = store_url.replace('"', '').replace("'", "")
                         docker_login_args = self._build_docker_command([
