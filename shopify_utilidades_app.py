@@ -31,7 +31,7 @@ from docker_bin.docker_path_helper import get_docker_exe
 # ──────────────────────────────────────────────────────────────────────────────
 #  VERSIÓN Y ACTUALIZACIÓN AUTOMÁTICA
 # ──────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.2.10"  # <-- actualiza este valor en cada release
+APP_VERSION = "1.3.0"  # <-- actualiza este valor en cada release
 
 # URL pública donde publicas tu version.json (GitHub raw, servidor propio, etc.)
 # Ejemplo GitHub: "https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json"
@@ -8462,7 +8462,7 @@ walk(dir);
         ttk.Label(shopify_frame, text="Nombre del tema").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         ttk.Entry(shopify_frame, textvariable=theme_name_var).grid(row=1, column=1, sticky="ew", padx=6)
 
-        ttk.Label(shopify_frame, text="Contrasena de la tienda").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(shopify_frame, text="Contraseña de la tienda").grid(row=2, column=0, sticky="w", padx=6, pady=6)
         self._add_password_entry_with_toggle(shopify_frame, store_password_var, row=2, column=1, padx=6)
         def _open_password_help() -> None:
             import webbrowser
@@ -8476,7 +8476,7 @@ walk(dir);
         ).grid(row=2, column=2, padx=6, pady=6)
         ttk.Label(
             shopify_frame,
-            text="Admin Shopify > Configuracion > Tienda online > Preferencias > Proteccion con contrasena",
+            text="Admin Shopify > Configuracion > Tienda online > Preferencias > Proteccion con contraseña",
             style="Muted.TLabel",
             wraplength=420,
         ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
